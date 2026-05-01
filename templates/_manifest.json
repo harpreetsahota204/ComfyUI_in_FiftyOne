@@ -1,0 +1,157 @@
+{
+  "templates": [
+    {
+      "id": "image_edit_qwen_2511",
+      "name": "Image Edit (Qwen 2511)",
+      "description": "Edit images with natural language prompts using Qwen Image Edit",
+      "file": "image_edit_qwen_2511.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Image Generation"
+    },
+    {
+      "id": "pose_to_image_turbo",
+      "name": "Pose to Image (Z-Image-Turbo)",
+      "description": "Generate image from pose with controlnet",
+      "file": "pose_to_image_turbo.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Image Generation"
+    },
+    {
+      "id": "canny_to_image_turbo",
+      "name": "Canny to Image (Z-Image-Turbo)",
+      "description": "Generate image from canny edges",
+      "file": "canny_to_image_turbo.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Image Generation"
+    },
+    {
+      "id": "depth_to_image_turbo",
+      "name": "Depth to Image (Z-Image-Turbo)",
+      "description": "Generate image from depth map",
+      "file": "depth_to_image_turbo.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Image Generation"
+    },
+    {
+      "id": "image_upscale_turbo",
+      "name": "Image Upscale (Z-Image-Turbo)",
+      "description": "Upscale image with AI",
+      "file": "image_upscale_turbo.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Image Processing"
+    },
+    {
+      "id": "image_captioning_gemini",
+      "name": "Image Captioning (Gemini)",
+      "description": "Generate image captions using Gemini",
+      "file": "image_captioning_gemini.json",
+      "input_types": ["image"],
+      "output_type": "text",
+      "category": "Analysis"
+    },
+    {
+      "id": "image_inpainting_qwen",
+      "name": "Image Inpainting (Qwen)",
+      "description": "Inpaint masked regions of an image",
+      "file": "image_inpainting_qwen.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Image Generation"
+    },
+    {
+      "id": "image_outpainting_qwen",
+      "name": "Image Outpainting (Qwen)",
+      "description": "Extend an image beyond its borders",
+      "file": "image_outpainting_qwen.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Image Generation"
+    },
+    {
+      "id": "image_to_layers_qwen",
+      "name": "Image to Layers (Qwen)",
+      "description": "Decompose image into semantic layers",
+      "file": "image_to_layers_qwen.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Analysis"
+    },
+    {
+      "id": "image_to_depth_lotus",
+      "name": "Image to Depth Map (Lotus)",
+      "description": "Generate depth map from image",
+      "file": "image_to_depth_lotus.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Analysis"
+    },
+    {
+      "id": "brightness_and_contrast",
+      "name": "Brightness and Contrast",
+      "description": "Adjust brightness and contrast",
+      "file": "brightness_and_contrast.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Image Processing"
+    },
+    {
+      "id": "hue_and_saturation",
+      "name": "Hue and Saturation",
+      "description": "Adjust hue and saturation",
+      "file": "hue_and_saturation.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Image Processing"
+    },
+    {
+      "id": "film_grain",
+      "name": "Film Grain",
+      "description": "Apply film grain effect",
+      "file": "film_grain.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Image Processing"
+    },
+    {
+      "id": "sharpen",
+      "name": "Sharpen",
+      "description": "Sharpen image details",
+      "file": "sharpen.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Image Processing"
+    },
+    {
+      "id": "image_blur",
+      "name": "Image Blur",
+      "description": "Apply gaussian blur",
+      "file": "image_blur.json",
+      "input_types": ["image"],
+      "output_type": "image",
+      "category": "Image Processing"
+    },
+    {
+      "id": "image_to_video_wan",
+      "name": "Image to Video (Wan 2.2)",
+      "description": "Generate video from image using Wan 2.2",
+      "file": "image_to_video_wan.json",
+      "input_types": ["image"],
+      "output_type": "video",
+      "category": "Video"
+    },
+    {
+      "id": "image_to_model_hunyuan3d",
+      "name": "Image to 3D Model (Hunyuan3D)",
+      "description": "Generate 3D model from image",
+      "file": "image_to_model_hunyuan3d.json",
+      "input_types": ["image"],
+      "output_type": "3d",
+      "category": "3D"
+    }
+  ]
+}

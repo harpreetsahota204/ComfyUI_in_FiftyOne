@@ -1,0 +1,13 @@
+name: "@harpreetsahota/comfyui-plugin"
+type: plugin
+author: Harpreet Sahota
+version: "0.1.0"
+description: "Embed a full ComfyUI instance inside the FiftyOne sample modal. Run any workflow against the current sample and save outputs as group slices."
+fiftyone:
+  version: ">=0.25"
+js_bundle: dist/index.umd.js
+panels:
+  - comfyui_panel
+operators:
+  - save_comfy_output
+  - get_comfy_templates
