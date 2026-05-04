@@ -33,10 +33,44 @@ function getWorkflowName() {
 }
 
 // Node classes that get the dynamic slice name widget
-const SLICE_NODE_CLASSES = new Set(["FO_SaveImage", "FO_SaveVideo"]);
+const SLICE_NODE_CLASSES = new Set(["FO_SaveImage", "FO_SaveVideo", "FO_Save3D"]);
 
-// Map node class → expected media type for filtering available slices
-const NODE_MEDIA_TYPE = { FO_SaveImage: "image", FO_SaveVideo: "video" };
+// Map node class → expected media type for filtering available slices.
+// FiftyOne lumps every 3D asset format (.glb/.ply/.obj/.stl/.fbx/.pcd)
+// under a single ``"3d"`` media type, so all 3D save destinations share
+// one slice pool here.
+const NODE_MEDIA_TYPE = {
+  FO_SaveImage: "image",
+  FO_SaveVideo: "video",
+  FO_Save3D: "3d",
+};
+
+// ComfyUI output socket types that indicate a node produces 3D data —
+// used by the right-click "Save 3D to FiftyOne" detector to decide
+// whether to show that menu item on a node.  Both legacy (``MESH``) and
+// modern V3 names (``FILE_3D_*``) are listed.  Terminal save nodes
+// (e.g. ``SaveGLB``) have no output sockets — they're detected via the
+// ``_last3DOutputs`` cache instead.
+const THREE_D_OUTPUT_TYPES = new Set([
+  "MESH",
+  "VOXEL",
+  "FILE_3D",
+  "FILE_3D_ANY",
+  "FILE_3D_GLB",
+  "FILE_3D_GLTF",
+  "FILE_3D_OBJ",
+  "FILE_3D_FBX",
+  "FILE_3D_STL",
+  "FILE_3D_USDZ",
+]);
+
+// Cache of the latest 3D file each node has emitted via ComfyUI's
+// ``executed`` event (output["3d"] = [{filename, subfolder, type}]).
+// Right-click "Save 3D to FiftyOne" pulls from here because terminal
+// 3D save nodes (SaveGLB, third-party SaveOBJ / SavePLY / etc.)
+// don't have an output socket — they only emit a UI dict.
+//   Map<string nodeId, {filename, subfolder}>
+const _last3DOutputs = new Map();
 
 const STARTER_WORKFLOW = {
   last_node_id: 3,
@@ -116,16 +150,22 @@ app.registerExtension({
       _DBG("execution_start, promptId=", lastPromptId, "workflowName=", cachedWorkflowName);
     });
 
-    // We forward only `output.images` to the parent's right-click "Save to
-    // FiftyOne" UI.  Videos and other media types intentionally rely on
-    // their corresponding FO_Save* nodes (FO_SaveVideo, FO_SaveText, …)
-    // because the right-click flow has no way to know how to encode/store
-    // them — and the user explicitly preferred node-based saving for
-    // non-image outputs.
+    // We forward `output.images` to the parent's right-click "Save to
+    // FiftyOne" UI for the image flow.  ``output["3d"]`` lands in our
+    // local cache so the right-click "Save 3D to FiftyOne" handler can
+    // pick up filenames written by terminal save nodes (SaveGLB, etc.)
+    // that don't have output sockets.  Videos / text / depth / etc.
+    // intentionally rely on their corresponding FO_Save* nodes — the
+    // right-click flow has no way to know how to encode/store them.
     api.addEventListener("executed", (event) => {
       const output = event.detail?.output;
       const nodeId = event.detail?.node;
-      _DBG("executed event: nodeId=", nodeId, "hasOutput=", !!output, "images=", output?.images?.length);
+      _DBG(
+        "executed event: nodeId=", nodeId,
+        "hasOutput=", !!output,
+        "images=", output?.images?.length,
+        "3d=", output?.["3d"]?.length,
+      );
       if (!output) return;
 
       if (output.images && output.images.length > 0) {
@@ -142,6 +182,19 @@ app.registerExtension({
           "*"
         );
       }
+
+      if (output["3d"] && output["3d"].length > 0) {
+        // Cache the most recent 3D file for this node — the right-click
+        // "Save 3D to FiftyOne" handler reads from here.  We only keep
+        // the most recent (overwrite) since the menu pulls one file per
+        // click anyway.
+        const item = output["3d"][0];
+        _last3DOutputs.set(String(nodeId), {
+          filename: item.filename,
+          subfolder: item.subfolder || "",
+        });
+        _DBG("executed: cached 3D output for node", nodeId, "→", item.filename);
+      }
     });
 
     window.addEventListener("message", (event) => {
@@ -157,9 +210,10 @@ app.registerExtension({
       }
 
       if (event.data?.type === MSG.SAMPLE_CHANGED) {
-        _DBG("SAMPLE_CHANGED received from parent — refreshing LoadImage previews + SAM3 collector canvases");
+        _DBG("SAMPLE_CHANGED received from parent — refreshing LoadImage previews + SAM3 collector canvases + clearing prompts");
         refreshLoadImagePreviews();
         refreshSAM3CollectorImages();
+        clearStalePromptsOnSampleChange();
       }
 
       if (event.data?.type === MSG.GET_WORKFLOW) {
@@ -198,6 +252,7 @@ app.registerExtension({
         depth: "FO_SaveDepth",
         detections: "FO_SaveDetections",
         segmentation: "FO_SaveSegmentation",
+        "3d": "FO_Save3D",
       };
       // Detection / segmentation nodes emit a richer payload (boxes JSON,
       // mask filenames, fallback labels, etc.).  These extras ride along
@@ -342,7 +397,11 @@ app.registerExtension({
     const items = [];
     const hasImage = nodeHasImageOutput(node);
     const hasString = nodeHasStringOutput(node);
-    _DBG("getNodeMenuItems: node=", node.comfyClass || node.type, "id=", node.id, "hasImage=", hasImage, "hasString=", hasString);
+    const has3D = nodeHas3DOutput(node);
+    _DBG(
+      "getNodeMenuItems: node=", node.comfyClass || node.type,
+      "id=", node.id, "hasImage=", hasImage, "hasString=", hasString, "has3D=", has3D,
+    );
 
     if (hasImage) {
       items.push({
@@ -360,6 +419,16 @@ app.registerExtension({
         callback: () => {
           _DBG("context menu: 'Save Text to FiftyOne' clicked, node=", node.type, "id=", node.id);
           saveTextToFiftyOne(node);
+        },
+      });
+    }
+
+    if (has3D) {
+      items.push({
+        content: "Save 3D to FiftyOne",
+        callback: () => {
+          _DBG("context menu: 'Save 3D to FiftyOne' clicked, node=", node.type, "id=", node.id);
+          saveToFiftyOne3D(node);
         },
       });
     }
@@ -1036,6 +1105,19 @@ function updateAllSaveNodeSliceWidgets() {
  * their preview from the server, without reloading the entire graph (which
  * would create a new workflow tab in ComfyUI).
  */
+// Node-type set for "any node that loads an image from ComfyUI's input dir
+// via an `image` widget whose value is a filename string." Both the
+// built-in `LoadImage` and our `FO_LoadImage` subclass (registered under
+// FiftyOne/IO for discoverability) have identical widget semantics, so we
+// treat them interchangeably for refresh / scope-of-prompt-clear logic.
+//
+// If a future custom node also wraps `LoadImage` (or has compatible
+// widgets), add its `node.type` here.
+const LOAD_IMAGE_NODE_TYPES = new Set([
+  "LoadImage",     // built-in ComfyUI
+  "FO_LoadImage",  // our subclass under FiftyOne/IO
+]);
+
 function refreshLoadImagePreviews() {
   try {
     const nodes = app.graph._nodes || [];
@@ -1046,7 +1128,7 @@ function refreshLoadImagePreviews() {
     const skippedIds = [];
 
     for (const node of nodes) {
-      if (node.type !== "LoadImage") continue;
+      if (!LOAD_IMAGE_NODE_TYPES.has(node.type)) continue;
       loadImageCount++;
 
       const widget = node.widgets?.find((w) => w.name === "image");
@@ -1121,13 +1203,14 @@ function refreshSAM3CollectorImages() {
       if (!SAM3_COLLECTOR_CLASSES.has(node.comfyClass)) continue;
       collectorCount++;
 
-      // Only refresh collectors backed (one hop) by a LoadImage pointed
-      // at the active-sample file. Other upstreams (resize / preprocess /
-      // per-slice files) are intentionally left alone — they either don't
-      // change on pagination, or have post-processing we can't replay
-      // without queueing the workflow.
+      // Only refresh collectors backed (one hop) by a LoadImage-equivalent
+      // node (LoadImage or FO_LoadImage) pointed at the active-sample file.
+      // Other upstreams (resize / preprocess / per-slice files) are
+      // intentionally left alone — they either don't change on pagination,
+      // or have post-processing we can't replay without queueing the
+      // workflow.
       const upstream = _findUpstreamImageNode(node, "image");
-      if (!upstream || upstream.type !== "LoadImage") {
+      if (!upstream || !LOAD_IMAGE_NODE_TYPES.has(upstream.type)) {
         _DBG("  SAM3 collector id=", node.id, "class=", node.comfyClass,
              "→ skipping (upstream is", upstream?.type ?? "<none>", ")");
         continue;
@@ -1194,6 +1277,132 @@ function refreshSAM3CollectorImages() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Prompt clearing on sample-pagination
+// ---------------------------------------------------------------------------
+//
+// Two categories of node hold "prompt-shaped" state that's meaningful only
+// for the sample on the canvas at the time it was entered:
+//
+//   1. SAM3 interactive collectors (point / bbox / multi-region / interactive) —
+//      the user clicks on the canvas to drop points/boxes whose pixel
+//      coordinates only make sense for the image currently shown.
+//   2. Text-prompt nodes (SAM3Grounding, GroundingDetector) — the user
+//      types a noun phrase like "person, dog" that targets the current
+//      image's contents.
+//
+// When the user paginates to a different sample, both categories should
+// reset so the new sample starts fresh. Otherwise the user would have
+// to manually clear before queueing — easy to forget, and the stale
+// prompt state often produces confusing results.
+//
+// SAM3 collector clearing is scoped to collectors whose upstream is a
+// LoadImage pointed at ``fo_current_sample.png`` (matches refreshSAM3-
+// CollectorImages — collectors pinned to per-slice files don't follow
+// pagination, so their prompts shouldn't either). Text-prompt nodes are
+// cleared unconditionally — they don't have a "current sample" tether
+// we can use.
+//
+// If a future use case wants persistent prompts across pagination,
+// we'd add an opt-out widget on the node or a panel-level toggle.
+// ---------------------------------------------------------------------------
+
+const SAM3_PROMPT_CLEAR_HANDLERS = {
+  SAM3PointCollector: (node) => {
+    const cw = node.canvasWidget;
+    if (!cw) return false;
+    cw.positivePoints = [];
+    cw.negativePoints = [];
+    cw.hoveredPoint = null;
+    if (typeof node.updatePoints === "function") node.updatePoints();
+    if (typeof node.redrawCanvas === "function") node.redrawCanvas();
+    return true;
+  },
+  SAM3BBoxCollector: (node) => {
+    const cw = node.canvasWidget;
+    if (!cw) return false;
+    cw.positiveBBoxes = [];
+    cw.negativeBBoxes = [];
+    cw.hoveredBBox = null;
+    cw.currentBBox = null;
+    if (typeof node.updateBBoxes === "function") node.updateBBoxes();
+    if (typeof node.redrawCanvas === "function") node.redrawCanvas();
+    return true;
+  },
+  SAM3MultiRegionCollector: (node) => {
+    if (typeof node.clearAllPrompts !== "function") return false;
+    node.clearAllPrompts();
+    return true;
+  },
+  SAM3InteractiveCollector: (node) => {
+    if (typeof node.clearAllPrompts !== "function") return false;
+    node.clearAllPrompts();
+    return true;
+  },
+};
+
+// Maps comfyClass → widget name to clear. Each entry zeroes a single
+// STRING widget on the node. Keep this list short — only widgets that
+// represent "what to find / segment" in the current image should appear.
+const TEXT_PROMPT_TARGETS = {
+  SAM3Grounding: "text_prompt",
+  GroundingDetector: "prompt",
+};
+
+function clearStalePromptsOnSampleChange() {
+  try {
+    const nodes = app.graph?._nodes || [];
+    let collectorReset = 0;
+    let textReset = 0;
+
+    for (const node of nodes) {
+      const handler = SAM3_PROMPT_CLEAR_HANDLERS[node.comfyClass];
+      if (handler) {
+        // Only reset collectors whose upstream is a LoadImage-equivalent
+        // pointed at the active-sample file, mirroring
+        // refreshSAM3CollectorImages (so per-slice-pinned collectors
+        // keep their state).
+        const upstream = _findUpstreamImageNode(node, "image");
+        const fileWidget = upstream?.widgets?.find((w) => w.name === "image");
+        const filename = fileWidget?.value;
+        if (
+          upstream &&
+          LOAD_IMAGE_NODE_TYPES.has(upstream.type) &&
+          filename === "fo_current_sample.png"
+        ) {
+          if (handler(node)) {
+            collectorReset++;
+            _DBG("  cleared prompts on", node.comfyClass, "id=", node.id);
+          }
+        }
+        continue;
+      }
+
+      const textWidgetName = TEXT_PROMPT_TARGETS[node.comfyClass];
+      if (textWidgetName) {
+        const w = node.widgets?.find((x) => x.name === textWidgetName);
+        if (w && w.value) {
+          w.value = "";
+          textReset++;
+          _DBG(
+            "  cleared", textWidgetName, "on", node.comfyClass, "id=", node.id,
+          );
+        }
+      }
+    }
+
+    if (collectorReset || textReset) {
+      app.graph.setDirtyCanvas(true, true);
+    }
+    _DBG(
+      "clearStalePromptsOnSampleChange: collectorReset=", collectorReset,
+      "textReset=", textReset,
+    );
+  } catch (e) {
+    console.warn("[fiftyone-bridge] prompt-clear error:", e);
+  }
+}
+
 function nodeHasImageOutput(node) {
   return (
     node.imgs?.length > 0 ||
@@ -1203,6 +1412,16 @@ function nodeHasImageOutput(node) {
 
 function nodeHasStringOutput(node) {
   return node.outputs?.some((o) => o.type === "STRING");
+}
+
+function nodeHas3DOutput(node) {
+  // Has a 3D output socket type — covers MESH / VOXEL / FILE_3D_* etc.
+  if (node.outputs?.some((o) => THREE_D_OUTPUT_TYPES.has(o.type))) {
+    return true;
+  }
+  // ...or has previously emitted a 3D file (terminal save node like
+  // SaveGLB / pack-native SaveOBJ etc., which have no output sockets).
+  return _last3DOutputs.has(String(node.id));
 }
 
 function saveTextToFiftyOne(node) {
@@ -1283,6 +1502,45 @@ function blobToBase64(blob) {
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
+}
+
+// Right-click "Save 3D to FiftyOne" — pulls the latest cached 3D file
+// emitted by this node (populated by the ``executed`` event listener)
+// and ships it to the FiftyOne panel as a new sample.  Uses the same
+// auto-save path FO_Save3D's node-based flow does, defaulting to
+// ``save_mode="new_sample"`` for a zero-click experience.  Users who
+// want group_slice / labels should drop the FO_Save3D node into their
+// workflow instead — the right-click is a quick path.
+function saveToFiftyOne3D(node) {
+  _DBG("saveToFiftyOne3D: node=", node.type, "id=", node.id);
+  const cached = _last3DOutputs.get(String(node.id));
+  if (!cached) {
+    _DBG(
+      "saveToFiftyOne3D: ABORTED — no cached 3D output for node",
+      node.id,
+      "(node may not have run yet — queue the workflow first)",
+    );
+    return;
+  }
+
+  _DBG("saveToFiftyOne3D: sending OUTPUT_READY, filename=", cached.filename);
+  window.parent.postMessage(
+    {
+      type: MSG.OUTPUT_READY,
+      outputType: "3d",
+      nodeTitle: node.title || node.type,
+      nodeId: node.id,
+      promptId: lastPromptId,
+      workflowName: cachedWorkflowName || getWorkflowName(),
+      filename: cached.filename,
+      subfolder: cached.subfolder,
+      autoSave: true,
+      saveMode: "new_sample",
+      fieldName: "comfy_output",
+      copyLabels: "",
+    },
+    "*"
+  );
 }
 
 // ---------------------------------------------------------------------------

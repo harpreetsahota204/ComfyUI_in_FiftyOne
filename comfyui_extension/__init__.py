@@ -10,6 +10,7 @@ Registers:
 
 from .nodes import (
     FO_LoadImage,
+    FO_Save3D,
     FO_SaveDepth,
     FO_SaveDetections,
     FO_SaveImage,
@@ -28,6 +29,7 @@ NODE_CLASS_MAPPINGS = {
     "FO_SaveDepth": FO_SaveDepth,
     "FO_SaveDetections": FO_SaveDetections,
     "FO_SaveSegmentation": FO_SaveSegmentation,
+    "FO_Save3D": FO_Save3D,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -37,6 +39,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FO_SaveDepth": "Save Depth to FiftyOne",
     "FO_SaveDetections": "Save Detections to FiftyOne",
     "FO_SaveSegmentation": "Save Segmentation to FiftyOne",
+    "FO_Save3D": "Save 3D to FiftyOne",
 }
 
 # The Load shortcut is only registered if we successfully imported

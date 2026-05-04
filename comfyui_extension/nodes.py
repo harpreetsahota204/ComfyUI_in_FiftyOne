@@ -811,6 +811,381 @@ class FO_SaveSegmentation:
 
 
 # ---------------------------------------------------------------------------
+# 3D save helpers
+# ---------------------------------------------------------------------------
+#
+# We delegate the actual mesh serialization to ComfyUI's built-in
+# ``save_glb`` helper (``comfy_extras/nodes_hunyuan3d.py:save_glb``) —
+# the same one its native ``SaveGLB`` ("Save 3D Model") node uses.
+# Doing so lets us inherit ComfyUI's batch / dtype / format handling
+# for free without re-implementing them or pulling in ``trimesh``.
+#
+# Three input shapes are supported on the ``model`` socket:
+#   - ``str`` filepath ending in a 3D extension → preserve verbatim
+#   - object exposing ``save_to(path)`` (File3D / VHS wrappers) → call it
+#   - MESH tensor (``.vertices`` + ``.faces`` attributes) → delegate to
+#     ``save_glb``
+
+# Extensions FiftyOne natively recognizes for media_type="3d".
+_VALID_3D_EXTS = (".glb", ".gltf", ".obj", ".ply", ".stl", ".fbx", ".pcd", ".fo3d")
+
+
+def _copy_3d_file(source_path, output_dir, prefix):
+    """Copy a 3D asset file into the ComfyUI output dir, preserving extension."""
+    src_ext = os.path.splitext(source_path)[1].lower() or ".glb"
+    filename = f"fo_{prefix}_{_unique_suffix()}{src_ext}"
+    shutil.copy2(source_path, os.path.join(output_dir, filename))
+    return filename
+
+
+def _save_glb_via_comfy(verts, faces, output_path):
+    """Write a GLB by delegating to ComfyUI's ``save_glb`` helper.
+
+    ``save_glb`` lives in ``comfy_extras/nodes_hunyuan3d.py`` and is the
+    serializer the built-in 'Save 3D Model' (SaveGLB) node uses.  It
+    expects unbatched ``(N, 3)`` torch tensors of vertices and faces;
+    we coerce non-tensor inputs upstream of this helper.
+
+    Imported lazily so loading FO_Save3D doesn't fail in a ComfyUI build
+    that's missing the helper (older or more minimal forks).
+    """
+    try:
+        from comfy_extras.nodes_hunyuan3d import save_glb
+    except ImportError as exc:
+        raise RuntimeError(
+            "Cannot import ComfyUI's `save_glb` helper "
+            "(comfy_extras.nodes_hunyuan3d.save_glb).  FO_Save3D needs a "
+            "ComfyUI build that ships the native 'Save 3D Model' node — "
+            "this is the same node you would otherwise use to write GLBs."
+        ) from exc
+
+    # save_glb expects torch tensors with .cpu().numpy() callable.
+    # Coerce numpy / list / non-tensor inputs.
+    import torch
+    if not torch.is_tensor(verts):
+        verts = torch.from_numpy(np.asarray(verts))
+    if not torch.is_tensor(faces):
+        faces = torch.from_numpy(np.asarray(faces))
+
+    save_glb(verts, faces, output_path)
+    return output_path
+
+
+def _save_pointcloud_ply(verts, output_path):
+    """Write a vertex-only point cloud as a binary PLY file.
+
+    Used when a MESH-like input has ``.vertices`` but no ``.faces`` — the
+    classic shape coming out of Gaussian-splat / point-cloud workflows
+    (DreamGaussian, Trellis, custom packs).  ``save_glb`` requires faces,
+    so we side-step it here and write PLY directly via numpy.
+
+    PLY 1.0 binary format with little-endian floats.  Optional per-vertex
+    RGB colors are picked up from a 4-tuple input or skipped if absent.
+    """
+    verts_np = np.asarray(
+        verts.detach().cpu().numpy() if hasattr(verts, "detach") else verts,
+        dtype=np.float32,
+    )
+    if verts_np.ndim != 2 or verts_np.shape[1] != 3:
+        raise ValueError(
+            f"Expected vertices of shape [N, 3] for point cloud, "
+            f"got {verts_np.shape}"
+        )
+    n = verts_np.shape[0]
+
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {n}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "end_header\n"
+    ).encode("ascii")
+
+    with open(output_path, "wb") as f:
+        f.write(header)
+        f.write(verts_np.astype(np.float32, copy=False).tobytes())
+
+    print(f"[_save_pointcloud_ply] wrote {output_path} verts={n}")
+    return output_path
+
+
+def _serialize_meshlike(verts, faces, output_dir, prefix):
+    """Write a mesh-or-point-cloud given vertices and optional faces.
+
+    Picks between ``save_glb`` (full mesh) and ``_save_pointcloud_ply``
+    (vertices only) based on whether faces are present.  Used by both
+    the MESH-tensor and MESH-dict branches of ``_resolve_3d_input``.
+    """
+    v_shape = getattr(verts, "shape", None)
+    f_shape = getattr(faces, "shape", None) if faces is not None else None
+
+    # Strip leading singleton batch dims to match save_glb's expectation
+    # of (N, 3) / (M, 3).  ComfyUI's MESH carries [B, N, 3] tensors; this
+    # also handles dicts whose authors mirrored that convention.
+    if v_shape is not None and len(v_shape) == 3:
+        if v_shape[0] > 1:
+            print(
+                f"[_serialize_meshlike]   verts batch={v_shape[0]} > 1, "
+                f"saving first only"
+            )
+        verts = verts[0]
+    if (
+        faces is not None
+        and f_shape is not None
+        and len(f_shape) == 3
+    ):
+        faces = faces[0]
+
+    has_real_faces = (
+        faces is not None
+        and getattr(faces, "shape", None) is not None
+        and len(faces.shape) == 2
+        and faces.shape[0] > 0
+    )
+
+    if has_real_faces:
+        filename = f"fo_{prefix}_{_unique_suffix()}.glb"
+        target_path = os.path.join(output_dir, filename)
+        _save_glb_via_comfy(verts, faces, target_path)
+        print(f"[_serialize_meshlike]   wrote {target_path} via ComfyUI save_glb")
+    else:
+        filename = f"fo_{prefix}_{_unique_suffix()}.ply"
+        target_path = os.path.join(output_dir, filename)
+        _save_pointcloud_ply(verts, target_path)
+        print(f"[_serialize_meshlike]   wrote {target_path} as point-cloud PLY")
+    return filename
+
+
+def _resolve_3d_input(model, output_dir, prefix):
+    """Accept any common ComfyUI 3D-asset representation, return a filename.
+
+    Five input patterns, checked in order:
+
+    1. ``str`` filepath ending in a valid 3D extension → copy verbatim.
+    2. Object exposing ``save_to(path)`` (ComfyUI ``File3D``, VHS-style
+       wrappers).  File3D objects know their own format via ``.format``.
+    3. Object exposing ``export(path)`` (trimesh.Trimesh, open3d meshes,
+       custom pack types).  Lets the object self-serialize to whatever
+       format its ``export`` infers from the extension we pick.
+    4. **MESH tensor** (``.vertices`` + ``.faces`` attributes — ComfyUI
+       core's ``MESH`` class) → ``save_glb`` for full meshes, PLY for
+       vertex-only.
+    5. **MESH dict** (``{"vertices": ..., "faces": ...}`` — used by
+       third-party packs like ComfyUI-3D-Pack) → same routing as (4).
+
+    Lists / tuples are walked for the first usable item.
+    """
+    type_name = type(model).__name__
+    is_str = isinstance(model, str)
+    is_dict = isinstance(model, dict)
+    is_seq = isinstance(model, (list, tuple))
+    has_save_to = hasattr(model, "save_to") and callable(getattr(model, "save_to", None))
+    has_export = hasattr(model, "export") and callable(getattr(model, "export", None))
+    has_vertices_attr = hasattr(model, "vertices")
+
+    print(
+        f"[_resolve_3d_input] type={type_name}, "
+        f"is_str={is_str}, is_dict={is_dict}, is_seq={is_seq}, "
+        f"has_save_to={has_save_to}, has_export={has_export}, "
+        f"has_vertices_attr={has_vertices_attr}"
+    )
+
+    # 1. Filepath str — passthrough, preserves source extension.
+    if is_str and model:
+        if not os.path.isfile(model):
+            raise ValueError(f"3D filepath does not exist: {model}")
+        ext = os.path.splitext(model)[1].lower()
+        if ext not in _VALID_3D_EXTS:
+            raise ValueError(
+                f"Unsupported 3D file extension {ext!r}. "
+                f"Supported: {', '.join(_VALID_3D_EXTS)}"
+            )
+        print(f"[_resolve_3d_input]   branch: filepath passthrough ({ext})")
+        return _copy_3d_file(model, output_dir, prefix)
+
+    # 2. File3D / VHS wrapper objects with `save_to(path)` — they handle
+    # their own serialization.  File3D's `.format` attribute carries the
+    # extension; fall back to GLB if absent.
+    if has_save_to:
+        ext = (getattr(model, "format", None) or "glb").lstrip(".").lower() or "glb"
+        filename = f"fo_{prefix}_{_unique_suffix()}.{ext}"
+        target_path = os.path.join(output_dir, filename)
+        print(f"[_resolve_3d_input]   branch: model.save_to({target_path}) (.{ext})")
+        model.save_to(target_path)
+        return filename
+
+    # 3. trimesh.Trimesh / open3d / custom mesh classes that expose
+    # ``export(path)`` — their export() infers the format from the
+    # extension we choose.  We pick GLB (FiftyOne-recommended) and let
+    # the object handle the conversion.  Skip for File3D, which we
+    # already handled via save_to.
+    if has_export:
+        filename = f"fo_{prefix}_{_unique_suffix()}.glb"
+        target_path = os.path.join(output_dir, filename)
+        print(f"[_resolve_3d_input]   branch: model.export({target_path})")
+        try:
+            model.export(target_path)
+            return filename
+        except Exception as exc:
+            # Some objects (e.g. open3d) have export() with a different
+            # signature.  Fall through to the attribute / dict branches
+            # below, which will pull the raw vertex/face arrays.
+            print(
+                f"[_resolve_3d_input]   model.export() failed: {exc!s:.120} "
+                f"— falling through to .vertices/.faces"
+            )
+
+    # 4. MESH class instance — ComfyUI core's MESH (.vertices + .faces).
+    # Open3D's TriangleMesh exposes .vertices + .triangles; we accept
+    # that shape too.
+    if has_vertices_attr:
+        verts = getattr(model, "vertices", None)
+        faces = getattr(model, "faces", None)
+        if faces is None:
+            faces = getattr(model, "triangles", None)
+        v_shape = getattr(verts, "shape", None)
+        f_shape = getattr(faces, "shape", None)
+        print(
+            f"[_resolve_3d_input]   branch: MESH ({type_name}), "
+            f"vertices.shape={v_shape}, faces.shape={f_shape}"
+        )
+        if verts is None:
+            raise ValueError(
+                f"MESH input ({type_name}) has missing vertices "
+                f"(verts={v_shape}, faces={f_shape})"
+            )
+        return _serialize_meshlike(verts, faces, output_dir, prefix)
+
+    # 5. MESH dict — ComfyUI-3D-Pack and similar packs use a dict
+    # ``{"vertices": ..., "faces": ...}`` shape rather than a class.
+    # Same routing as the MESH-class branch above.
+    if is_dict and ("vertices" in model or "verts" in model):
+        verts = model.get("vertices", model.get("verts"))
+        faces = model.get("faces", model.get("triangles"))
+        v_shape = getattr(verts, "shape", None)
+        f_shape = getattr(faces, "shape", None)
+        print(
+            f"[_resolve_3d_input]   branch: MESH dict, "
+            f"vertices.shape={v_shape}, faces.shape={f_shape}, "
+            f"keys={list(model.keys())[:8]}"
+        )
+        return _serialize_meshlike(verts, faces, output_dir, prefix)
+
+    # 6. list / tuple — walk for first usable item.
+    if is_seq:
+        print(f"[_resolve_3d_input]   branch: walking list/tuple of len={len(model)}")
+        for i, item in enumerate(model):
+            try:
+                return _resolve_3d_input(item, output_dir, prefix)
+            except (ValueError, TypeError) as exc:
+                print(f"[_resolve_3d_input]     list[{i}] skipped: {exc!s:.120}")
+                continue
+
+    # Final raise with diagnostic info.
+    attrs = []
+    if is_dict:
+        attrs = list(model.keys())[:30]
+    elif not (is_str or is_seq):
+        attrs = [a for a in dir(model) if not a.startswith("_")][:30]
+    raise ValueError(
+        f"Cannot extract 3D model from input type {type_name}. "
+        f"Supported: filepath string ({', '.join(_VALID_3D_EXTS)}), "
+        f"objects with save_to() / export(), MESH class (.vertices/.faces), "
+        f"or MESH dict (vertices/faces).  "
+        f"Attributes/keys seen: {attrs}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FO_Save3D
+# ---------------------------------------------------------------------------
+
+class FO_Save3D:
+    """Save a 3D model output to FiftyOne with ``media_type="3d"``.
+
+    Polymorphic on the ``model`` socket — accepts:
+
+    - **Filepath strings** (``.glb/.gltf/.obj/.ply/.stl/.fbx/.pcd/.fo3d``):
+      preserved verbatim.
+    - **File3D objects** (ComfyUI V3 type system, e.g. from a 3D loader)
+      via their ``save_to(path)`` method, which preserves their format.
+    - **MESH tensors** (``.vertices`` + ``.faces`` attributes): delegated
+      to ComfyUI's built-in ``save_glb`` helper — the same one its
+      native 'Save 3D Model' (SaveGLB) node uses.  Output is GLB.
+
+    Saves the file alongside the source sample on disk and creates either
+    a brand-new sample (``new_sample``) or a group slice (``group_slice``)
+    in FiftyOne, mirroring FO_SaveImage / FO_SaveVideo.
+    """
+
+    CATEGORY = "FiftyOne/IO"
+    FUNCTION = "execute"
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    DESCRIPTION = (
+        "Save a 3D model to FiftyOne. Connects to any 3D output — filepath "
+        "strings, File3D objects, or MESH tensors. Delegates MESH "
+        "serialization to ComfyUI's built-in save_glb helper for "
+        "broad compatibility."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"model": (ANY, {})},
+            "optional": {
+                "save_mode": _SAVE_MODE_WIDGET,
+                "name": _NAME_WIDGET,
+                "labels": _LABELS_WIDGET,
+            },
+        }
+
+    def execute(
+        self,
+        model,
+        save_mode="new_sample",
+        name="comfy_output",
+        labels="",
+        **_,
+    ):
+        print(
+            f"[FO_Save3D] called: model_type={type(model).__name__}, "
+            f"save_mode={save_mode!r}, name={name!r}, labels={labels!r}"
+        )
+        if model is None:
+            print("[FO_Save3D] SKIP — no model input connected")
+            return {}
+
+        try:
+            filename = _resolve_3d_input(
+                model, folder_paths.get_output_directory(), name,
+            )
+        except Exception as exc:
+            print(f"[FO_Save3D] ERROR resolving input: {exc}")
+            raise
+
+        print(
+            f"[FO_Save3D] dispatching to FiftyOne: filename={filename!r}, "
+            f"save_mode={save_mode!r}"
+        )
+        PromptServer.instance.send_sync("fiftyone.save_output", {
+            "type": "3d",
+            "save_mode": save_mode,
+            "name": name,
+            "filename": filename,
+            "subfolder": "",
+            "copy_labels": labels,
+        })
+        return {}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+
+# ---------------------------------------------------------------------------
 # FO_LoadImage
 # ---------------------------------------------------------------------------
 #

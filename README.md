@@ -10,7 +10,7 @@ When you open a sample in FiftyOne, a new **ComfyUI** tab appears in the modal. 
 
 - The current sample's image is automatically copied into ComfyUI's input directory and exposed as `fo_current_sample.png`. Drop a `LoadImage` node, point it at that filename, and you're ready to go.
 - Every group slice on the sample is also exposed as `fo_current_sample_<slice>.png` for multi-input workflows.
-- The plugin ships custom **save nodes** (`Save Image to FiftyOne`, `Save Video to FiftyOne`, `Save Text to FiftyOne`, `Save Depth to FiftyOne`, `Save Detections to FiftyOne`, `Save Segmentation to FiftyOne`) that send outputs back to FiftyOne with no further clicks.
+- The plugin ships custom **save nodes** (`Save Image to FiftyOne`, `Save Video to FiftyOne`, `Save Text to FiftyOne`, `Save Depth to FiftyOne`, `Save Detections to FiftyOne`, `Save Segmentation to FiftyOne`, `Save 3D to FiftyOne`) that send outputs back to FiftyOne with no further clicks.
 - A right-click menu also lets you save outputs from any image-producing ComfyUI node directly to the dataset, or convert a native `SaveImage` node into a `FO_SaveImage` in one action.
 - Saves can land as a **new group slice**, a **new sample**, a **`fo.Heatmap`** field, a **`fo.Classification`** field, a **string field**, a **`fo.Detections`** field, or a **`fo.Segmentation`** field — depending on output type and your choice.
 - **Bundled object-detection and segmentation** — `ComfyUI-Grounding` (GroundingDINO, MM-GroundingDINO, OWLv2, Florence-2, YOLO-World, SAM2) and `ComfyUI-SAM3` (text/click/box-prompted segmentation, including interactive collectors) are vendored into the plugin and installed automatically alongside the bridge.
@@ -112,6 +112,7 @@ Drop one of these into your workflow:
 | **`FO_SaveDepth`** | `fo.Heatmap` field on the current sample | (heatmap field name) |
 | **`FO_SaveDetections`** | `fo.Detections` field on the current sample | (detections field name) |
 | **`FO_SaveSegmentation`** | `fo.Segmentation` field on the current sample | (segmentation field name) |
+| **`FO_Save3D`** | `media_type="3d"` sample (`.glb / .ply / .obj / .stl / .fbx / .pcd`) | new sample · group slice |
 
 The detection node is **polymorphic** — it accepts both ComfyUI-Grounding outputs (`BBOX` lists, `STRING` labels, `FLOAT` scores, `MASK` per-instance masks) and ComfyUI-SAM3 outputs (`STRING`-JSON boxes/scores, `MASK` per-instance masks) on the same input slots. Hook up whatever your detector emits; the operator figures out the format. The optional `labels` widget is a multi-pill picker of fallback class names — used only when the upstream model doesn't emit per-detection labels (cycled round-robin).
 
@@ -162,6 +163,18 @@ Saves create a brand-new `fo.Sample` with `tags=["comfy_output"]` and a `source_
 `FO_SaveDetections` writes per-instance bounding boxes (and optional labels, scores, masks) onto the current sample as `fo.Detections`. Pixel-space xyxy boxes are converted to FiftyOne's normalized rxywh, and per-instance masks are cropped to their bbox before being attached to `fo.Detection.mask`.
 
 `FO_SaveSegmentation` writes a single semantic segmentation mask as `fo.Segmentation` on the current sample. The mask is stored on disk via `mask_path` next to the source sample's filepath (no in-memory conversion at view time). If the upstream `MASK` is multi-instance, the node argmaxes along the leading axis to produce an indexed map.
+
+### 3D model (mesh / point cloud)
+
+`FO_Save3D` accepts any of the following on its `model` socket and writes a single asset file alongside the source sample with `media_type="3d"`:
+
+- **Filepath strings** ending in `.glb / .gltf / .obj / .ply / .stl / .fbx / .pcd / .fo3d` — preserved verbatim. Use this when an upstream node has already saved a file (e.g. TripoSR, Comfy3D-Pack savers).
+- **File3D objects** (ComfyUI's V3 type system) — saved via their own `.save_to(path)` method, preserving their format (GLB / OBJ / etc.).
+- **MESH tensors** (the type emitted by `VoxelToMesh`, Hunyuan3D, and most pack-native MESH outputs) — serialized to GLB by **delegating to ComfyUI's built-in `save_glb` helper** (the same one its native 'Save 3D Model' / `SaveGLB` node uses). This means we inherit ComfyUI's batch / dtype / format handling for free, with no extra dependencies.
+
+GLB is the canonical output format for MESH inputs — the same FiftyOne recommends in its [3D datasets docs](https://docs.voxel51.com/user_guide/using_datasets.html#d-datasets) and the format ComfyUI itself produces.
+
+The new sample stores `media_type="3d"` and FiftyOne renders it via the App's 3D viewer. Note that the grid view shows a placeholder until you generate orthographic projection thumbnails (`fou3d.compute_orthographic_projection_images()` — not done automatically by the plugin).
 
 ---
 

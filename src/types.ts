@@ -24,7 +24,8 @@ export type ComfyOutputType =
   | "depth"
   | "video"
   | "detections"
-  | "segmentation";
+  | "segmentation"
+  | "3d";
 
 export type SaveDestination =
   | "group_slice"

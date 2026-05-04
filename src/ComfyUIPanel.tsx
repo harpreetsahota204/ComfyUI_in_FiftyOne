@@ -75,6 +75,9 @@ interface CachedSliceInfo {
  *   segmentation-save that involves a mask. Same FiftyOne caching
  *   problem as heatmaps — newly saved masks often don't render until
  *   the page is refreshed.
+ * - threeDSavedNotice: flips true after a successful 3D-asset save.
+ *   FiftyOne's 3D viewer / grid both cache aggressively; new samples
+ *   or slices typically don't render in the modal until refresh.
  */
 const _module = {
   persistedIframe: null as HTMLIFrameElement | null,
@@ -91,6 +94,14 @@ const _module = {
   flatGroupedNotice: false,
   depthSavedNotice: false,
   maskSavedNotice: false,
+  threeDSavedNotice: false,
+  // Last "<slice>:<sampleId>" key broadcast to the bridge as
+  // SAMPLE_CHANGED.  Stays at module scope so it survives panel
+  // unmount/remount — without that, tab-switching back to the ComfyUI
+  // panel would re-broadcast for the same sample and clobber the user's
+  // SAM3 collector prompts (the bridge clears them on every
+  // SAMPLE_CHANGED).
+  lastBridgedSampleKey: "",
 };
 
 // ---------------------------------------------------------------------------
@@ -332,6 +343,7 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
   const [showFlatGroupedBanner, setShowFlatGroupedBanner] = useState(_module.flatGroupedNotice);
   const [showDepthSavedBanner, setShowDepthSavedBanner] = useState(_module.depthSavedNotice);
   const [showMaskSavedBanner, setShowMaskSavedBanner] = useState(_module.maskSavedNotice);
+  const [showThreeDSavedBanner, setShowThreeDSavedBanner] = useState(_module.threeDSavedNotice);
 
   // ── Read modalGroupSlice as a Loadable, NOT via useRecoilValue ───────
   //
@@ -631,6 +643,17 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
           _DBG(`executeSave: ${outputType} save complete, raising refresh banner`);
           _module.maskSavedNotice = true;
           setShowMaskSavedBanner(true);
+        }
+
+        // 3D saves land as new samples (or group slices) with
+        // ``media_type="3d"``.  FiftyOne's grid + modal 3D viewer cache
+        // aggressively, so newly added 3D content typically won't show
+        // up until a browser refresh.  Same banner pattern as depth /
+        // masks.
+        if (outputType === "3d") {
+          _DBG("executeSave: 3D save complete, raising refresh banner");
+          _module.threeDSavedNotice = true;
+          setShowThreeDSavedBanner(true);
         }
 
         _DBG("executeSave: triggering dataset reload via panel method");
@@ -1004,6 +1027,10 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
   // itself; if it can't resolve the sample, it returns a clean error
   // and we simply log it.  Better to attempt the inject than silently
   // skip and leave the LoadImage preview stale.
+  // Per-instance dedupe — within a single panel mount, we don't re-fire
+  // injectSlice for the same activeModalSlice. Module-level dedupe is
+  // separately enforced on the bridge broadcast (see _module
+  // .lastBridgedSampleKey below).
   const prevSliceRef = useRef<string | null>(null);
   useEffect(() => {
     if (!activeModalSlice) {
@@ -1023,11 +1050,24 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
       }
       if (result?.sample_filename && _module.bridgeReady) {
         setSampleFilename(result.sample_filename);
-        _DBG("slice tab: sending SAMPLE_CHANGED to iframe");
-        iframeRef.current?.contentWindow?.postMessage(
-          { type: MSG.SAMPLE_CHANGED },
-          "*"
-        );
+
+        // Module-level dedupe: only broadcast SAMPLE_CHANGED if the
+        // visible sample (slice + sample id) actually changed since the
+        // last broadcast.  ``prevSliceRef`` resets on every panel
+        // remount, so without this guard a tab-switch-and-back would
+        // re-broadcast for the SAME sample and the bridge's clear-
+        // prompts handler would nuke the user's SAM3 collector state.
+        const sampleKey = `${activeModalSlice}:${result.sample_id || ""}`;
+        if (sampleKey === _module.lastBridgedSampleKey) {
+          _DBG("slice tab: SAMPLE_CHANGED skipped — same sample as last broadcast (key=", sampleKey, ")");
+        } else {
+          _module.lastBridgedSampleKey = sampleKey;
+          _DBG("slice tab: sending SAMPLE_CHANGED to iframe (key=", sampleKey, ")");
+          iframeRef.current?.contentWindow?.postMessage(
+            { type: MSG.SAMPLE_CHANGED },
+            "*"
+          );
+        }
       }
       // Different slices can have different label-field sets (a slice may
       // have annotations the original lacks, or vice versa).  Refresh so
@@ -1164,6 +1204,17 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
       onDismiss: () => {
         _module.maskSavedNotice = false;
         setShowMaskSavedBanner(false);
+      },
+    },
+    {
+      key: "threed-saved",
+      visible: showThreeDSavedBanner,
+      title: "3D model saved.",
+      body:
+        "Refresh the browser to see the new 3D sample / slice in the dataset.",
+      onDismiss: () => {
+        _module.threeDSavedNotice = false;
+        setShowThreeDSavedBanner(false);
       },
     },
   ];
