@@ -81,7 +81,9 @@ const STARTER_WORKFLOW = {
       inputs: [{ name: "image", type: "IMAGE", link: null }],
       outputs: [],
       properties: { "Node name for S&R": "FO_SaveImage" },
-      widgets_values: ["new_sample", "comfy_output"],
+      // Order matches FO_SaveImage.INPUT_TYPES: save_mode, name, labels.
+      // Keeping all three keeps round-trip serialize/deserialize stable.
+      widgets_values: ["new_sample", "comfy_output", ""],
     },
   ],
   links: [[1, 1, 0, 2, 0, "IMAGE"]],
@@ -133,7 +135,6 @@ app.registerExtension({
             outputs: output.images.map((img) => ({
               filename: img.filename,
               subfolder: img.subfolder || "",
-              imgType: img.type || "output",
             })),
             nodeId: nodeId,
             promptId: lastPromptId,
@@ -156,8 +157,9 @@ app.registerExtension({
       }
 
       if (event.data?.type === MSG.SAMPLE_CHANGED) {
-        _DBG("SAMPLE_CHANGED received from parent — calling refreshLoadImagePreviews()");
+        _DBG("SAMPLE_CHANGED received from parent — refreshing LoadImage previews + SAM3 collector canvases");
         refreshLoadImagePreviews();
+        refreshSAM3CollectorImages();
       }
 
       if (event.data?.type === MSG.GET_WORKFLOW) {
@@ -189,13 +191,78 @@ app.registerExtension({
       const data = event.detail;
       const saveMode = data.save_mode || "new_sample";
       const outputType = data.type || "image";
-      const titleMap = { image: "FO_SaveImage", video: "FO_SaveVideo", text: "FO_SaveText", depth: "FO_SaveDepth" };
+      const titleMap = {
+        image: "FO_SaveImage",
+        video: "FO_SaveVideo",
+        text: "FO_SaveText",
+        depth: "FO_SaveDepth",
+        detections: "FO_SaveDetections",
+        segmentation: "FO_SaveSegmentation",
+      };
+      // Detection / segmentation nodes emit a richer payload (boxes JSON,
+      // mask filenames, fallback labels, etc.).  These extras ride along
+      // unchanged in the OUTPUT_READY message and are forwarded to the
+      // operator as ctx.params keys with the same name.
+      const extras =
+        outputType === "detections"
+          ? {
+              field: data.field || "detections",
+              imageHeight: data.image_height || 0,
+              imageWidth: data.image_width || 0,
+              boxesJson: data.boxes_json || "",
+              predLabelsJson: data.pred_labels_json || "",
+              scoresJson: data.scores_json || "",
+              masksFilename: data.masks_filename || "",
+              fallbackLabels: data.fallback_labels || "",
+            }
+          : outputType === "segmentation"
+          ? {
+              field: data.field || "segmentation",
+              maskTargets: data.mask_targets || "",
+            }
+          : {};
+
+      // Single structured log line — bypasses the browser console's "…"
+      // truncation on multi-key objects, but still gives the type + key
+      // sizes (boxesJson can be MB-sized so we don't dump its contents).
+      if (outputType === "detections") {
+        _DBG(
+          "fiftyone.save_output → OUTPUT_READY (detections):",
+          "field=", extras.field,
+          "boxesJson_len=", (extras.boxesJson || "").length,
+          "labelsJson_len=", (extras.predLabelsJson || "").length,
+          "scoresJson_len=", (extras.scoresJson || "").length,
+          "masksFilename=", extras.masksFilename || "(empty)",
+          "fallbackLabels=", extras.fallbackLabels || "(empty)",
+          "imageHW=", `${extras.imageHeight}x${extras.imageWidth}`,
+        );
+      } else if (outputType === "segmentation") {
+        _DBG(
+          "fiftyone.save_output → OUTPUT_READY (segmentation):",
+          "field=", extras.field,
+          "maskTargets=", extras.maskTargets || "(empty)",
+          "filename=", data.filename || "(empty)",
+        );
+      } else {
+        _DBG(
+          "fiftyone.save_output → OUTPUT_READY:",
+          "type=", outputType,
+          "saveMode=", saveMode,
+          "filename=", data.filename || "(empty)",
+        );
+      }
+
       window.parent.postMessage(
         {
           type: MSG.OUTPUT_READY,
           outputType,
           nodeTitle: titleMap[outputType] || "FO_SaveImage",
-          nodeId: null,
+          // nodeId is supplied by the right-click flows (saveToFiftyOne /
+          // saveTextToFiftyOne) where we know exactly which node the
+          // user clicked.  Auto-save events don't carry it through —
+          // the `executed` listener has the node id but plumbing it
+          // here would require keeping a per-promptId map. Skip until
+          // there's a real consumer.
           promptId: lastPromptId,
           workflowName: cachedWorkflowName,
           filename: data.filename || "",
@@ -203,8 +270,12 @@ app.registerExtension({
           textValue: data.text || null,
           autoSave: true,
           saveMode: saveMode,
-          fieldName: data.name || "comfy_output",
+          // For detection / segmentation nodes the "name" we ship to the
+          // panel is the destination field (extras.field).  Other nodes
+          // continue to use ``data.name`` (the slice / file / heatmap name).
+          fieldName: extras.field || data.name || "comfy_output",
           copyLabels: data.copy_labels || "",
+          extras,
         },
         "*"
       );
@@ -236,9 +307,10 @@ app.registerExtension({
   },
 
   nodeCreated(node) {
-    // SLICE_NODE_CLASSES (FO_SaveImage / FO_SaveVideo) and FO_SaveDepth
-    // are mutually exclusive — keep them as if/else so the dispatch is
-    // explicit and we don't accidentally run both setups on the same node.
+    // The four save-node families have mutually exclusive widget setups,
+    // so dispatch via if/else.  FO_SaveDetections and FO_SaveSegmentation
+    // both expose a free-text "field" picker; only Detections additionally
+    // gets the multi-pill labels widget.
     if (SLICE_NODE_CLASSES.has(node.comfyClass)) {
       const saveModeWidget = node.widgets?.find((w) => w.name === "save_mode");
       if (saveModeWidget && !["new_sample", "group_slice"].includes(saveModeWidget.value)) {
@@ -249,6 +321,18 @@ app.registerExtension({
       setupLabelsWidget(node);
     } else if (node.comfyClass === "FO_SaveDepth") {
       setupDepthWidget(node);
+    } else if (node.comfyClass === "FO_SaveDetections") {
+      _DBG("nodeCreated: FO_SaveDetections, wiring widgets node=", node.id);
+      setupDetectionsFieldWidget(node);
+      setupPillsWidget(node, "labels", {
+        label: "Class fallback",
+        placeholder: "Type a class name, press Enter…",
+        emptyText: "(no fallback — upstream labels will be used)",
+        accent: "#ffb454",
+      });
+    } else if (node.comfyClass === "FO_SaveSegmentation") {
+      _DBG("nodeCreated: FO_SaveSegmentation, wiring widget node=", node.id);
+      setupSegmentationFieldWidget(node);
     }
   },
 
@@ -502,6 +586,31 @@ function setupDepthWidget(node) {
   _DBG("setupDepthWidget: done for node", node.id, "heatmapFields=", availableHeatmapFields.length);
 }
 
+// Detection / segmentation save nodes share a single "field" name widget
+// that lands on the active sample.  No autocomplete suggestions today —
+// the user free-types the field name (e.g. "detections", "segmentation").
+// If we ever want to pre-populate from existing dataset fields, this is
+// the spot: replace the empty array with one sourced from SLICE_INFO.
+
+function _setupFreeTextFieldWidget(node, setupFlag, debugName) {
+  const w = node.widgets?.find((x) => x.name === "field");
+  if (!w || node[setupFlag]) return;
+  node[setupFlag] = true;
+
+  w.label = "Field";
+  w._foGetSuggestions = () => [];
+  _installInlineOnClick(node, w);
+  _DBG(`${debugName}: done for node`, node.id);
+}
+
+function setupDetectionsFieldWidget(node) {
+  _setupFreeTextFieldWidget(node, "_foDetFieldSetup", "setupDetectionsFieldWidget");
+}
+
+function setupSegmentationFieldWidget(node) {
+  _setupFreeTextFieldWidget(node, "_foSegFieldSetup", "setupSegmentationFieldWidget");
+}
+
 // ---------------------------------------------------------------------------
 // "Copy labels" widget — multi-select with pills, opens on click.
 //
@@ -702,14 +811,218 @@ function showInlineLabelsPicker(node, widget, available) {
   _DBG("showInlineLabelsPicker: opened, selected=", Array.from(selected));
 }
 
+// ---------------------------------------------------------------------------
+// Free-text multi-pill picker — like showInlineLabelsPicker but the pills
+// are arbitrary strings the user types in (Enter commits the typed token
+// to a new pill).  Used by FO_SaveDetections / FO_SaveSegmentation to let
+// the user provide fallback class names when the upstream model doesn't
+// emit per-detection labels.
+//
+// Optional `suggestions` are displayed below the input as a one-click
+// list; clicking a suggestion adds it as a pill (same behavior as Enter).
+// ---------------------------------------------------------------------------
+
+function setupPillsWidget(node, widgetName, opts = {}) {
+  const w = node.widgets?.find((x) => x.name === widgetName);
+  if (!w) {
+    _DBG("setupPillsWidget: widget not found", widgetName, "on node", node.id);
+    return;
+  }
+  const flag = `_foPillsSetup_${widgetName}`;
+  if (node[flag]) return;
+  node[flag] = true;
+
+  if (opts.label) w.label = opts.label;
+  w.onClick = function () {
+    _DBG("pills widget click: node=", node.id, "widget=", widgetName, "value=", w.value);
+    showInlinePillPicker(node, w, opts);
+  };
+  _DBG("setupPillsWidget: done for", widgetName, "on node", node.id);
+}
+
+function showInlinePillPicker(node, widget, opts = {}) {
+  if (_activeInlineInput) {
+    _activeInlineInput.remove();
+    _activeInlineInput = null;
+  }
+
+  const canvas = app.canvas;
+  const canvasEl = canvas.canvas;
+  if (!canvasEl) return;
+  const rect = canvasEl.getBoundingClientRect();
+  const scale = canvas.ds?.scale || 1;
+  const widgetY = widget.last_y !== undefined ? widget.last_y : 0;
+  const gx = node.pos[0];
+  const gy = node.pos[1] + widgetY;
+  const convertFn = canvas.ds?.convertOffsetToCanvas;
+  let screenX, screenY;
+  if (convertFn) {
+    const [cx, cy] = convertFn.call(canvas.ds, [gx, gy]);
+    screenX = cx + rect.left;
+    screenY = cy + rect.top;
+  } else {
+    screenX = gx * scale + rect.left;
+    screenY = gy * scale + rect.top;
+  }
+  const sw = Math.max(node.size[0] * scale, 240);
+  const accent = opts.accent || "#ffb454";
+
+  const initial = String(widget.value || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const pills = [...initial];
+
+  const container = document.createElement("div");
+  container.style.cssText =
+    `position:fixed;left:${screenX}px;top:${screenY}px;` +
+    `width:${sw}px;z-index:10000;` +
+    `background:#1a1a2e;border:2px solid ${accent};border-radius:4px;` +
+    `font-family:sans-serif;color:#eee;font-size:12px;` +
+    `box-shadow:0 4px 16px rgba(0,0,0,0.5);`;
+
+  const pillsRow = document.createElement("div");
+  pillsRow.style.cssText =
+    `display:flex;flex-wrap:wrap;gap:4px;padding:6px;min-height:24px;` +
+    `border-bottom:1px solid #2a2a4a;`;
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = opts.placeholder || "Type a name and press Enter…";
+  input.style.cssText =
+    `width:100%;box-sizing:border-box;padding:6px 8px;` +
+    `background:#12121e;color:#eee;border:none;` +
+    `outline:none;font-family:inherit;font-size:inherit;`;
+
+  const suggestions = Array.isArray(opts.suggestions) ? opts.suggestions : [];
+  const list = document.createElement("div");
+  list.style.cssText = `max-height:180px;overflow-y:auto;border-top:1px solid #2a2a4a;`;
+
+  function renderPills() {
+    pillsRow.innerHTML = "";
+    if (pills.length === 0) {
+      const empty = document.createElement("span");
+      empty.textContent = opts.emptyText || "(no labels — upstream values will be used)";
+      empty.style.cssText = "color:#808098;font-style:italic;padding:2px 4px;";
+      pillsRow.appendChild(empty);
+      return;
+    }
+    pills.forEach((name, idx) => {
+      const pill = document.createElement("span");
+      pill.style.cssText =
+        `background:${accent};color:#1a1a2e;padding:2px 6px;` +
+        `border-radius:10px;font-size:11px;cursor:pointer;` +
+        `display:inline-flex;align-items:center;gap:4px;`;
+      pill.textContent = name;
+      const x = document.createElement("span");
+      x.textContent = "×";
+      x.style.cssText = "font-weight:bold;font-size:14px;line-height:1;";
+      pill.appendChild(x);
+      pill.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        pills.splice(idx, 1);
+        renderAll();
+      });
+      pillsRow.appendChild(pill);
+    });
+  }
+
+  function renderList() {
+    list.innerHTML = "";
+    if (suggestions.length === 0) return;
+    const q = input.value.toLowerCase();
+    const matches = suggestions.filter(
+      (n) => !pills.includes(n) && (!q || n.toLowerCase().includes(q))
+    );
+    if (matches.length === 0) return;
+    matches.forEach((name) => {
+      const row = document.createElement("div");
+      row.style.cssText = `padding:6px 10px;cursor:pointer;color:#eee;`;
+      row.textContent = name;
+      row.addEventListener("mouseenter", () => { row.style.background = "#222244"; });
+      row.addEventListener("mouseleave", () => { row.style.background = "transparent"; });
+      row.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        pills.push(name);
+        input.value = "";
+        renderAll();
+      });
+      list.appendChild(row);
+    });
+  }
+
+  function renderAll() { renderPills(); renderList(); }
+
+  function commit() {
+    if (!container.parentNode) return;
+    widget.value = pills.length === 0 ? "" : pills.join(",");
+    _DBG("pills picker commit: value=", widget.value);
+    container.remove();
+    _activeInlineInput = null;
+    app.graph.setDirtyCanvas(true, true);
+  }
+
+  let blurTimer = null;
+  input.addEventListener("input", renderList);
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      e.preventDefault();
+      commit();
+      return;
+    }
+    if (e.key === "Enter" || e.key === ",") {
+      e.preventDefault();
+      const tok = input.value.trim();
+      if (tok && !pills.includes(tok)) {
+        pills.push(tok);
+        input.value = "";
+        renderAll();
+      } else if (!tok) {
+        commit();
+      }
+      return;
+    }
+    if (e.key === "Backspace" && !input.value && pills.length > 0) {
+      pills.pop();
+      renderAll();
+    }
+  });
+  input.addEventListener("blur", () => { blurTimer = setTimeout(commit, 200); });
+  input.addEventListener("focus", () => {
+    if (blurTimer) { clearTimeout(blurTimer); blurTimer = null; }
+  });
+
+  container.appendChild(pillsRow);
+  container.appendChild(input);
+  if (suggestions.length > 0) container.appendChild(list);
+  document.body.appendChild(container);
+  _activeInlineInput = container;
+
+  renderAll();
+  try { input.focus(); } catch (_) { /* ignore */ }
+  _DBG("showInlinePillPicker: opened, pills=", pills.slice());
+}
+
 function updateAllSaveNodeSliceWidgets() {
   const nodes = app.graph?._nodes || [];
   for (const node of nodes) {
     if (SLICE_NODE_CLASSES.has(node.comfyClass)) {
       setupSliceWidget(node);
       setupLabelsWidget(node);
+    } else if (node.comfyClass === "FO_SaveDepth") {
+      setupDepthWidget(node);
+    } else if (node.comfyClass === "FO_SaveDetections") {
+      setupDetectionsFieldWidget(node);
+      setupPillsWidget(node, "labels", {
+        label: "Class fallback",
+        placeholder: "Type a class name, press Enter…",
+        emptyText: "(no fallback — upstream labels will be used)",
+        accent: "#ffb454",
+      });
+    } else if (node.comfyClass === "FO_SaveSegmentation") {
+      setupSegmentationFieldWidget(node);
     }
-    if (node.comfyClass === "FO_SaveDepth") setupDepthWidget(node);
   }
   app.graph.setDirtyCanvas(true, true);
 }
@@ -727,40 +1040,157 @@ function refreshLoadImagePreviews() {
   try {
     const nodes = app.graph._nodes || [];
     const ts = Date.now();
-    _DBG("refreshLoadImagePreviews: total nodes=", nodes.length);
 
     let loadImageCount = 0;
     let matchedCount = 0;
+    const skippedIds = [];
 
     for (const node of nodes) {
       if (node.type !== "LoadImage") continue;
       loadImageCount++;
 
       const widget = node.widgets?.find((w) => w.name === "image");
-      _DBG("  LoadImage node id=", node.id, "widget.value=", widget?.value, "hasCallback=", !!widget?.callback, "hasImgs=", !!node.imgs, "imgCount=", node.imgs?.length);
-
       if (!widget || widget.value !== "fo_current_sample.png") {
-        _DBG("  → skipping (value mismatch)");
+        skippedIds.push(`${node.id}(${widget?.value ?? "?"})`);
         continue;
       }
       matchedCount++;
 
       node.imgs = null;
-
       widget.value = `fo_current_sample.png?_=${ts}`;
       widget.value = "fo_current_sample.png";
       if (widget.callback) {
-        _DBG("  → calling widget.callback()");
         widget.callback(widget.value, app.graph, node);
-      } else {
-        _DBG("  → WARNING: no widget.callback found!");
       }
     }
 
-    _DBG("refreshLoadImagePreviews: loadImageNodes=", loadImageCount, "matched=", matchedCount);
+    _DBG(
+      "refreshLoadImagePreviews: total=", nodes.length,
+      "LoadImage=", loadImageCount,
+      "refreshed=", matchedCount,
+      ...(skippedIds.length ? ["skipped=", skippedIds] : []),
+    );
     app.graph.setDirtyCanvas(true, true);
   } catch (e) {
     console.warn("[fiftyone-bridge] preview refresh error:", e);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SAM3 interactive-collector canvas refresh
+// ---------------------------------------------------------------------------
+//
+// The four SAM3 collector nodes (Point / BBox / MultiRegion / Interactive)
+// render an image on a DOM canvas where the user clicks to drop points or
+// drag boxes.  Their canvas image is only updated by their ``onExecuted``
+// handler — i.e. AFTER the workflow runs — so paginating samples in FiftyOne
+// would otherwise leave the canvas frozen on the previous image while
+// LoadImage already shows the new one.  Clicks then land on the wrong
+// coordinate space.
+//
+// On every SAMPLE_CHANGED we walk the graph: for any SAM3 collector whose
+// ``image`` input traces back through a single hop to a LoadImage pointed at
+// ``fo_current_sample.png`` (the active-slice file the panel rewrites on
+// pagination), we fetch that file via ComfyUI's /view endpoint and swap the
+// collector's ``canvasWidget.image`` in place.  Existing user-placed
+// points/boxes are intentionally KEPT — we don't second-guess workflow state.
+// If the user wants a clean canvas, they have a "Clear All" button.
+
+const SAM3_COLLECTOR_CLASSES = new Set([
+  "SAM3PointCollector",
+  "SAM3BBoxCollector",
+  "SAM3MultiRegionCollector",
+  "SAM3InteractiveCollector",
+]);
+
+function _findUpstreamImageNode(node, inputName = "image") {
+  const input = node.inputs?.find((i) => i.name === inputName);
+  if (!input || input.link == null) return null;
+  const link = app.graph.links?.[input.link];
+  if (!link) return null;
+  return app.graph.getNodeById?.(link.origin_id) ?? null;
+}
+
+function refreshSAM3CollectorImages() {
+  try {
+    const nodes = app.graph?._nodes || [];
+    let collectorCount = 0;
+    let refreshedCount = 0;
+
+    for (const node of nodes) {
+      if (!SAM3_COLLECTOR_CLASSES.has(node.comfyClass)) continue;
+      collectorCount++;
+
+      // Only refresh collectors backed (one hop) by a LoadImage pointed
+      // at the active-sample file. Other upstreams (resize / preprocess /
+      // per-slice files) are intentionally left alone — they either don't
+      // change on pagination, or have post-processing we can't replay
+      // without queueing the workflow.
+      const upstream = _findUpstreamImageNode(node, "image");
+      if (!upstream || upstream.type !== "LoadImage") {
+        _DBG("  SAM3 collector id=", node.id, "class=", node.comfyClass,
+             "→ skipping (upstream is", upstream?.type ?? "<none>", ")");
+        continue;
+      }
+      const fileWidget = upstream.widgets?.find((w) => w.name === "image");
+      const filename = fileWidget?.value;
+      if (filename !== "fo_current_sample.png") {
+        _DBG("  SAM3 collector id=", node.id, "→ skipping (LoadImage widget=", filename, ")");
+        continue;
+      }
+      if (!node.canvasWidget) {
+        _DBG("  SAM3 collector id=", node.id, "→ skipping (no canvasWidget yet)");
+        continue;
+      }
+
+      const ts = Date.now();
+      const url = `/view?filename=${encodeURIComponent(filename)}&type=input&_=${ts}`;
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const cw = node.canvasWidget;
+          if (!cw || !cw.canvas) return;
+
+          cw.image = img;
+          cw.canvas.width = img.width;
+          cw.canvas.height = img.height;
+
+          // Resize node + container to match new aspect — mirrors the
+          // sizing math each SAM3 widget runs in its own onExecuted
+          // (we can't share that code; it's per-widget closures).
+          const nodeWidth = node.size?.[0] || 400;
+          const availableWidth = nodeWidth - 20;
+          const aspectRatio = img.height / img.width;
+          const newWidgetHeight = Math.round(availableWidth * aspectRatio);
+
+          node._isResizing = true;
+          cw.widgetHeight = newWidgetHeight;
+          if (cw.container) cw.container.style.height = newWidgetHeight + "px";
+          if (typeof node.setSize === "function") {
+            node.setSize([nodeWidth, newWidgetHeight + 80]);
+          }
+          setTimeout(() => { node._isResizing = false; }, 50);
+
+          if (typeof node.redrawCanvas === "function") {
+            node.redrawCanvas();
+          }
+          app.graph.setDirtyCanvas(true, true);
+          _DBG("  SAM3 collector id=", node.id, "class=", node.comfyClass,
+               "→ refreshed (", img.width, "x", img.height, ")");
+        } catch (e) {
+          console.warn("[fiftyone-bridge] SAM3 refresh inner error:", e);
+        }
+      };
+      img.onerror = (e) => {
+        console.warn("[fiftyone-bridge] SAM3 refresh image load failed for", url, e);
+      };
+      img.src = url;
+      refreshedCount++;
+    }
+
+    _DBG("refreshSAM3CollectorImages: collectors=", collectorCount, "refreshing=", refreshedCount);
+  } catch (e) {
+    console.warn("[fiftyone-bridge] SAM3 refresh error:", e);
   }
 }
 

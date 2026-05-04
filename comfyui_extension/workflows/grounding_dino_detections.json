@@ -1,0 +1,91 @@
+{
+  "id": "grounding-dino-detections-v2",
+  "revision": 0,
+  "last_node_id": 4,
+  "last_link_id": 4,
+  "version": 0.4,
+  "config": {},
+  "extra": {
+    "ds": { "scale": 0.9, "offset": [0, 0] }
+  },
+  "groups": [],
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [40, 200],
+      "size": [315, 314],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "links": [1], "slot_index": 0 },
+        { "name": "MASK",  "type": "MASK",  "links": null, "slot_index": 1 }
+      ],
+      "properties": { "Node name for S&R": "LoadImage" },
+      "widgets_values": ["fo_current_sample.png", "image"]
+    },
+    {
+      "id": 2,
+      "type": "GroundingModelLoader",
+      "pos": [40, 540],
+      "size": [330, 90],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "model", "type": "GROUNDING_MODEL", "links": [2], "slot_index": 0 }
+      ],
+      "properties": { "Node name for S&R": "GroundingModelLoader" },
+      "widgets_values": ["GroundingDINO: SwinT-OGC", true]
+    },
+    {
+      "id": 3,
+      "type": "GroundingDetector",
+      "pos": [420, 200],
+      "size": [380, 240],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        { "name": "model", "type": "GROUNDING_MODEL", "link": 2 },
+        { "name": "image", "type": "IMAGE",          "link": 1 }
+      ],
+      "outputs": [
+        { "name": "bboxes",          "type": "BBOX",   "links": [3], "slot_index": 0 },
+        { "name": "annotated_image", "type": "IMAGE",  "links": null, "slot_index": 1 },
+        { "name": "labels",          "type": "STRING", "links": [4], "slot_index": 2 },
+        { "name": "masks",           "type": "MASK",   "links": null, "slot_index": 3 }
+      ],
+      "properties": { "Node name for S&R": "GroundingDetector" },
+      "widgets_values": ["person . car . dog .", 0.3]
+    },
+    {
+      "id": 4,
+      "type": "FO_SaveDetections",
+      "pos": [860, 200],
+      "size": [340, 200],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        { "name": "boxes",       "type": "*",      "link": 3 },
+        { "name": "pred_labels", "type": "*",      "link": 4 },
+        { "name": "scores",      "type": "*",      "link": null },
+        { "name": "masks",       "type": "MASK",   "link": null },
+        { "name": "image",       "type": "IMAGE",  "link": null }
+      ],
+      "outputs": [],
+      "properties": { "Node name for S&R": "FO_SaveDetections" },
+      "widgets_values": ["detections", ""]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 3, 1, "IMAGE"],
+    [2, 2, 0, 3, 0, "GROUNDING_MODEL"],
+    [3, 3, 0, 4, 0, "BBOX"],
+    [4, 3, 2, 4, 1, "STRING"]
+  ]
+}

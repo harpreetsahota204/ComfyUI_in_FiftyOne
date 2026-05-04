@@ -117,7 +117,8 @@ const SaveDialog: React.FC<SaveDialogProps> = ({
   labelFields = [],
 }) => {
   const options = useMemo(
-    () => SAVE_OPTIONS[payload.outputType] || SAVE_OPTIONS.image,
+    // SAVE_OPTIONS.image is statically guaranteed to be defined (see types.ts).
+    () => SAVE_OPTIONS[payload.outputType] ?? SAVE_OPTIONS.image!,
     [payload.outputType]
   );
 

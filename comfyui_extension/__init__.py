@@ -1,15 +1,19 @@
 """FiftyOne Bridge — ComfyUI custom node package.
 
-Registers Save nodes for sending outputs back to FiftyOne, a Load Image
-shortcut entry under ``FiftyOne/IO`` (a thin wrapper around ComfyUI's
-built-in ``LoadImage``), and the ``fiftyone_bridge.js`` web extension
-via ``WEB_DIRECTORY``.
+Registers:
+  - Save nodes that ship outputs back to FiftyOne (image, video, text,
+    depth, detections, segmentation).
+  - A Load Image shortcut under ``FiftyOne/IO`` (thin wrapper around
+    ComfyUI's built-in ``LoadImage``).
+  - ``fiftyone_bridge.js`` web extension via ``WEB_DIRECTORY``.
 """
 
 from .nodes import (
     FO_LoadImage,
     FO_SaveDepth,
+    FO_SaveDetections,
     FO_SaveImage,
+    FO_SaveSegmentation,
     FO_SaveText,
     FO_SaveVideo,
     _HAS_FO_LOAD_IMAGE,
@@ -22,6 +26,8 @@ NODE_CLASS_MAPPINGS = {
     "FO_SaveVideo": FO_SaveVideo,
     "FO_SaveText": FO_SaveText,
     "FO_SaveDepth": FO_SaveDepth,
+    "FO_SaveDetections": FO_SaveDetections,
+    "FO_SaveSegmentation": FO_SaveSegmentation,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -29,6 +35,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FO_SaveVideo": "Save Video to FiftyOne",
     "FO_SaveText": "Save Text to FiftyOne",
     "FO_SaveDepth": "Save Depth to FiftyOne",
+    "FO_SaveDetections": "Save Detections to FiftyOne",
+    "FO_SaveSegmentation": "Save Segmentation to FiftyOne",
 }
 
 # The Load shortcut is only registered if we successfully imported
@@ -37,3 +45,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 if _HAS_FO_LOAD_IMAGE:
     NODE_CLASS_MAPPINGS["FO_LoadImage"] = FO_LoadImage
     NODE_DISPLAY_NAME_MAPPINGS["FO_LoadImage"] = "Load Image from FiftyOne"
+
+print(
+    f"[fiftyone_bridge] registered {len(NODE_CLASS_MAPPINGS)} node(s): "
+    f"{sorted(NODE_CLASS_MAPPINGS)}"
+)

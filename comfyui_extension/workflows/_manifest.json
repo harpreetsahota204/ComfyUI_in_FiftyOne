@@ -152,6 +152,24 @@
       "input_types": ["image"],
       "output_type": "3d",
       "category": "3D"
+    },
+    {
+      "id": "grounding_dino_detections",
+      "name": "Grounding (DINO) → Detections",
+      "description": "Text-prompted object detection — saves as fo.Detections",
+      "file": "grounding_dino_detections.json",
+      "input_types": ["image"],
+      "output_type": "detections",
+      "category": "Detection"
+    },
+    {
+      "id": "sam3_text_segmentation",
+      "name": "SAM3 (Text) → Segmentation",
+      "description": "Text-prompted segmentation via SAM3 — saves as fo.Segmentation",
+      "file": "sam3_text_segmentation.json",
+      "input_types": ["image"],
+      "output_type": "segmentation",
+      "category": "Segmentation"
     }
   ]
 }

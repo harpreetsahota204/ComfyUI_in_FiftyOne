@@ -10,11 +10,12 @@ When you open a sample in FiftyOne, a new **ComfyUI** tab appears in the modal. 
 
 - The current sample's image is automatically copied into ComfyUI's input directory and exposed as `fo_current_sample.png`. Drop a `LoadImage` node, point it at that filename, and you're ready to go.
 - Every group slice on the sample is also exposed as `fo_current_sample_<slice>.png` for multi-input workflows.
-- The plugin ships custom **save nodes** (`Save Image to FiftyOne`, `Save Video to FiftyOne`, `Save Text to FiftyOne`, `Save Depth to FiftyOne`) that send outputs back to FiftyOne with no further clicks.
+- The plugin ships custom **save nodes** (`Save Image to FiftyOne`, `Save Video to FiftyOne`, `Save Text to FiftyOne`, `Save Depth to FiftyOne`, `Save Detections to FiftyOne`, `Save Segmentation to FiftyOne`) that send outputs back to FiftyOne with no further clicks.
 - A right-click menu also lets you save outputs from any image-producing ComfyUI node directly to the dataset, or convert a native `SaveImage` node into a `FO_SaveImage` in one action.
-- Saves can land as a **new group slice**, a **new sample**, a **`fo.Heatmap`** field, a **`fo.Classification`** field, or a **string field** — depending on output type and your choice.
+- Saves can land as a **new group slice**, a **new sample**, a **`fo.Heatmap`** field, a **`fo.Classification`** field, a **string field**, a **`fo.Detections`** field, or a **`fo.Segmentation`** field — depending on output type and your choice.
+- **Bundled object-detection and segmentation** — `ComfyUI-Grounding` (GroundingDINO, MM-GroundingDINO, OWLv2, Florence-2, YOLO-World, SAM2) and `ComfyUI-SAM3` (text/click/box-prompted segmentation, including interactive collectors) are vendored into the plugin and installed automatically alongside the bridge.
 - Optionally copy any subset of the source sample's `fo.Label` fields onto the new sample.
-- 17 starter workflow templates ship with the plugin; you can save your own.
+- 19 starter workflow templates ship with the plugin (including `Grounding (DINO) → Detections` and `SAM3 (Text) → Segmentation`); you can save your own. Templates also surface in ComfyUI's native *Workflow Templates* tab under the `fiftyone_bridge` group.
 
 ---
 
@@ -24,6 +25,8 @@ When you open a sample in FiftyOne, a new **ComfyUI** tab appears in the modal. 
 - **Python** ≥ 3.9 (matching your FiftyOne install)
 - **ComfyUI** — installed and reachable on disk. The plugin spawns it on demand and reuses an existing process if one is running.
 - **ffmpeg** on `$PATH` — only needed if you'll save raw video frames via `FO_SaveVideo`. Saving existing video files (e.g. from `VHS_VideoCombine`) works without it.
+- **CUDA-capable GPU with ≥ 6 GB VRAM** — only required for the bundled `ComfyUI-Grounding` / `ComfyUI-SAM3` detection / segmentation pipelines. Other workflows (image edits, upscaling, captioning, etc.) work on CPU or smaller GPUs.
+- **Disk space** — `pip install -r requirements.txt` pulls roughly **2-4 GB** of ML dependencies on first install (`transformers`, `ultralytics`, `huggingface_hub`, `comfy-env`, etc.). Allow a few minutes.
 
 ---
 
@@ -107,6 +110,10 @@ Drop one of these into your workflow:
 | **`FO_SaveVideo`** | H.264 MP4 | new sample · group slice |
 | **`FO_SaveText`** | string field on the current sample | string field · classification |
 | **`FO_SaveDepth`** | `fo.Heatmap` field on the current sample | (heatmap field name) |
+| **`FO_SaveDetections`** | `fo.Detections` field on the current sample | (detections field name) |
+| **`FO_SaveSegmentation`** | `fo.Segmentation` field on the current sample | (segmentation field name) |
+
+The detection node is **polymorphic** — it accepts both ComfyUI-Grounding outputs (`BBOX` lists, `STRING` labels, `FLOAT` scores, `MASK` per-instance masks) and ComfyUI-SAM3 outputs (`STRING`-JSON boxes/scores, `MASK` per-instance masks) on the same input slots. Hook up whatever your detector emits; the operator figures out the format. The optional `labels` widget is a multi-pill picker of fallback class names — used only when the upstream model doesn't emit per-detection labels (cycled round-robin).
 
 When the workflow finishes, the save fires automatically — no dialog, no click. The node has widgets for:
 
@@ -150,6 +157,12 @@ Saves create a brand-new `fo.Sample` with `tags=["comfy_output"]` and a `source_
 
 `FO_SaveText` writes the text to a field on the current sample. Either as a plain `StringField` (default) or wrapped in `fo.Classification(label=text)` if you pick that destination from the dialog.
 
+### Detections / Segmentation field
+
+`FO_SaveDetections` writes per-instance bounding boxes (and optional labels, scores, masks) onto the current sample as `fo.Detections`. Pixel-space xyxy boxes are converted to FiftyOne's normalized rxywh, and per-instance masks are cropped to their bbox before being attached to `fo.Detection.mask`.
+
+`FO_SaveSegmentation` writes a single semantic segmentation mask as `fo.Segmentation` on the current sample. The mask is stored on disk via `mask_path` next to the source sample's filepath (no in-memory conversion at view time). If the upstream `MASK` is multi-instance, the node argmaxes along the leading axis to produce an indexed map.
+
 ---
 
 ## Copy labels (optional)
@@ -164,11 +177,21 @@ The picker only shows fields that are *actually populated on the sample you're v
 
 ## Templates
 
-The plugin ships 17 starter templates covering common workflows: image edit (Qwen), pose-/canny-/depth-to-image (Z-Image-Turbo), upscale, captioning (Gemini), inpainting, outpainting, depth (Lotus), 3D (Hunyuan3D), image-to-video (Wan), plus simple image-processing recipes (blur, sharpen, brightness, hue/saturation, film grain).
+The plugin ships **19 starter templates** covering common workflows:
+
+- **Detection / Segmentation** (powered by the bundled packs):
+  - `Grounding (DINO) → Detections`
+  - `SAM3 (Text) → Segmentation`
+- **Image generation / editing**: image edit (Qwen), pose-/canny-/depth-to-image (Z-Image-Turbo), upscale, inpainting, outpainting.
+- **Image processing**: blur, sharpen, brightness, hue/saturation, film grain.
+- **Analysis**: depth (Lotus), captioning (Gemini), image-to-layers (Qwen).
+- **Video / 3D**: image-to-video (Wan), 3D (Hunyuan3D).
 
 Pick one from the **Load template…** dropdown in the toolbar; the workflow loads with the current sample's image already wired into the right input slots. Run as-is or modify before queueing.
 
-To save your own template: build the workflow you want, click **Save Template** in the toolbar, give it a name. Saved templates appear in the dropdown alongside the built-ins on the next panel load. Templates are stored as workflow JSON in `comfyui-plugin/templates/`.
+The same JSONs live under `comfyui_extension/workflows/`, which means they ALSO appear in ComfyUI's native **Workflow Templates** browser under the `fiftyone_bridge` group — handy if you want to load one directly inside the iframe.
+
+To save your own template: build the workflow you want, click **Save Template** in the toolbar, give it a name. Saved templates appear in the dropdown alongside the built-ins on the next panel load.
 
 ---
 
@@ -203,6 +226,30 @@ Click the **Settings** button in the panel toolbar to configure:
 Settings are persisted in FiftyOne's execution store (`~/.fiftyone/comfyui_plugin/`). After changing them, click **Save & Restart** to apply.
 
 The plugin's PID file lives at `~/.fiftyone/comfyui_plugin/.comfyui.pid`. If ComfyUI is already running externally on the configured port, the plugin will detect it and reuse it instead of spawning a duplicate.
+
+---
+
+## Bundled third-party software
+
+The plugin vendors trimmed copies of two custom-node packs under `comfyui-plugin/vendor/`. They're symlinked into ComfyUI's `custom_nodes/` at panel startup so users don't have to install them separately.
+
+### `ComfyUI-Grounding`
+
+- **Purpose**: Object detection + SAM2 segmentation. Includes GroundingDINO, MM-GroundingDINO, OWLv2, Florence-2, YOLO-World, SA2VA, plus SAM2 segmentation and a bounding-box visualizer.
+- **Upstream**: <https://github.com/harpreetsahota204/ComfyUI-Grounding>
+- **License**: see `vendor/ComfyUI-Grounding/LICENSE`.
+- **What was kept**: `nodes/` (entire), `grounding_init.py`, `__init__.py`, `web/`, `workflows/`, `requirements.txt`, `pyproject.toml`, `README.md`, `LICENSE`.
+- **What was dropped**: `docs/`, `assets/`, `tests/`, `pytest.ini`, `requirements-dev.txt`, `install.py`, `prestartup_script.py`, `.github/`. The dropped scripts only existed for ComfyUI Manager-style auto-install of weights/wheels — we replace that responsibility with the plugin's own `requirements.txt`.
+
+### `ComfyUI-SAM3`
+
+- **Purpose**: SAM3 segmentation — text-prompted, click-based, and box-based, plus four interactive collector nodes (point / bbox / multi-region / interactive segmentation) that let you click directly on a node-rendered canvas.
+- **Upstream**: <https://github.com/harpreetsahota204/ComfyUI-SAM3>
+- **License**: see `vendor/ComfyUI-SAM3/LICENSE`.
+- **What was kept**: `nodes/` (image-only — `load_model.py`, `segmentation.py`, `sam3_interactive.py`, `sam3_model_patcher.py`, `_model_cache.py`, `image_utils.py`, `utils.py`, `sam3/`), `prestartup_script.py` (slimmed to invoke `comfy_env.setup_env()`), `web/`, `workflows/` (image-only), `requirements.txt`, `pyproject.toml`, `README.md`, `LICENSE`.
+- **What was dropped**: `docs/`, `assets/`, `install.py`, `comfy-test.toml`, `comfy-env-root.toml`, `nodes/sam3_video_nodes.py`, `nodes/video_state.py`, `nodes/inference_reconstructor.py`, `workflows/video_point_prompt.json`, `.github/`. Video tracking is deferred — we may revisit later. The interactive collectors require `comfy-env`, which is a hard pip dep declared in our top-level `requirements.txt`.
+
+If you'd rather use your own build of either pack (e.g. a fork or a newer upstream), drop a real directory at `ComfyUI/custom_nodes/ComfyUI-Grounding` or `ComfyUI/custom_nodes/ComfyUI-SAM3`. The plugin detects the conflict and skips its symlink, keeping yours active.
 
 ---
 
@@ -249,21 +296,26 @@ Coming from ComfyUI-Manager and other custom nodes — not from this plugin. We 
 comfyui-plugin/
 ├── fiftyone.yml                    # Plugin manifest
 ├── package.json                    # JS build config
-├── __init__.py                     # Python: panel + operators (1500 lines)
-├── comfyui_extension/              # ComfyUI custom nodes (Python + JS)
+├── __init__.py                     # Python: panel + operators (~1700 lines)
+├── comfyui_extension/              # ComfyUI bridge custom-node pack
 │   ├── __init__.py                 # Node registration
-│   ├── nodes.py                    # FO_SaveImage, FO_SaveVideo, FO_SaveText, FO_SaveDepth, FO_LoadImage
-│   └── js/
-│       └── fiftyone_bridge.js      # Iframe-side bridge: postMessage protocol, custom widgets, right-click menu
+│   ├── nodes.py                    # FO_Save{Image,Video,Text,Depth,Detections,Segmentation}, FO_LoadImage
+│   ├── js/
+│   │   └── fiftyone_bridge.js      # Iframe-side bridge: postMessage protocol, custom widgets, right-click menu
+│   └── workflows/                  # Starter workflow JSON files + _manifest.json (also visible in ComfyUI's Workflow Templates tab)
+├── vendor/                         # Bundled third-party custom-node packs (vendored)
+│   ├── ComfyUI-Grounding/          # Object detection + SAM2 segmentation
+│   └── ComfyUI-SAM3/               # SAM3 segmentation (text/click/box, incl. interactive collectors). Video files dropped.
 ├── src/                            # React panel (TypeScript)
 │   ├── ComfyUIPanel.tsx            # Main panel component
 │   ├── SaveDialog.tsx              # Right-click save dialog
 │   ├── dialogHost.tsx              # Separate React root for the save dialog
 │   ├── hooks/usePluginClient.ts    # Panel-method client
 │   └── …
-├── templates/                      # Starter workflow JSON files + manifest
 └── dist/                           # Built bundle (generated by `npm run build`)
 ```
+
+At panel startup the plugin symlinks all three of `comfyui_extension/`, `vendor/ComfyUI-Grounding/`, and `vendor/ComfyUI-SAM3/` into ComfyUI's `custom_nodes/` directory. If you already have a real (non-symlink) directory with the same name in `custom_nodes/`, your copy wins and the plugin logs a warning.
 
 ---
 

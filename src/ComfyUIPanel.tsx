@@ -71,6 +71,10 @@ interface CachedSliceInfo {
  *   throws ``Cannot perform Construct on a detached ArrayBuffer`` on
  *   first paint after a fresh save).  Cleared on dismiss; re-fires
  *   on the next depth save.
+ * - maskSavedNotice: flips true after a successful detections- or
+ *   segmentation-save that involves a mask. Same FiftyOne caching
+ *   problem as heatmaps — newly saved masks often don't render until
+ *   the page is refreshed.
  */
 const _module = {
   persistedIframe: null as HTMLIFrameElement | null,
@@ -86,6 +90,7 @@ const _module = {
   } as CachedSliceInfo,
   flatGroupedNotice: false,
   depthSavedNotice: false,
+  maskSavedNotice: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -190,6 +195,27 @@ const STYLES = {
   buttonDanger: {
     backgroundColor: COLORS.danger,
   },
+  noticeBanner: {
+    backgroundColor: "#FFEB52",
+    color: "#1a1a2e",
+    padding: "10px 16px",
+    display: "flex",
+    alignItems: "center",
+    gap: "12px",
+    fontSize: FONT.md,
+    flexShrink: 0,
+    borderBottom: "1px solid rgba(0,0,0,0.15)",
+  } as const,
+  noticeDismiss: {
+    background: "transparent",
+    border: "1px solid rgba(0,0,0,0.4)",
+    color: "#1a1a2e",
+    borderRadius: "4px",
+    padding: "4px 12px",
+    fontSize: FONT.sm,
+    cursor: "pointer",
+    fontWeight: 600,
+  } as const,
   iframeWrapper: {
     position: "relative" as const,
     flex: 1,
@@ -305,6 +331,7 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
   const [labelFields, setLabelFields] = useState<string[]>([]);
   const [showFlatGroupedBanner, setShowFlatGroupedBanner] = useState(_module.flatGroupedNotice);
   const [showDepthSavedBanner, setShowDepthSavedBanner] = useState(_module.depthSavedNotice);
+  const [showMaskSavedBanner, setShowMaskSavedBanner] = useState(_module.maskSavedNotice);
 
   // ── Read modalGroupSlice as a Loadable, NOT via useRecoilValue ───────
   //
@@ -345,6 +372,11 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
 
   const iframeRef = useRef<HTMLIFrameElement>(_module.persistedIframe);
   const iframeContainerRef = useRef<HTMLDivElement>(null);
+  // Mirrors `dialogOpen` so the iframe positioning function (running on
+  // a 500 ms interval) can decide whether to re-enable pointer-events
+  // without forcing the whole effect to tear down/re-attach on each
+  // dialog open/close.
+  const _dialogOpenRef = useRef(false);
 
   // Tracks whether the user clicked "Save Template" — used by the
   // postMessage handler below to know that an incoming WORKFLOW_DATA
@@ -465,11 +497,13 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
 
   useEffect(() => {
     if (!currentFilepath) return;
+    _DBG("templates effect: calling get_comfy_templates with filepath=", currentFilepath);
     templatesExecutor
       .execute({ filepath: currentFilepath })
       .then((res: any) => {
         const result = res?.result || res;
         const tpls = result?.templates || [];
+        _DBG("templates effect: got", tpls.length, "templates, default=", result?.default, "ids=", tpls.map((t: any) => t.id));
         setTemplates(tpls);
         if (result?.default && !selectedTemplate) {
           setSelectedTemplate(result.default);
@@ -513,8 +547,32 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
       const activeSliceForSave = activeModalSlice;
 
       setSaving(true);
-      _DBG("executeSave: target — currentSampleId=", currentSampleId, "currentFilepath=", currentFilepath, "active_slice=", activeSliceForSave, "wasGrouped=", wasGrouped);
-      _DBG("executeSave: config — outputType=", outputType, "saveAs=", saveAs, "fieldName=", fieldName, "copyLabels=", copyLabels, "autoSave=", !!payload.autoSave, "prompt_id=", payload.promptId, "workflowName=", payload.workflowName, "nodeTitle=", payload.nodeTitle);
+      _DBG(
+        "executeSave: target —",
+        "currentSampleId=", currentSampleId,
+        "currentFilepath=", currentFilepath,
+        "active_slice=", activeSliceForSave,
+        "wasGrouped=", wasGrouped,
+      );
+      // We deliberately don't log ``extras`` — for detections it can
+      // be MB-sized JSON (boxesJson). The bridge already logs a
+      // structured per-type summary at OUTPUT_READY emit time.
+      _DBG(
+        "executeSave: config —",
+        "outputType=", outputType,
+        "saveAs=", saveAs,
+        "fieldName=", fieldName,
+        "copyLabels=", copyLabels,
+        "autoSave=", !!payload.autoSave,
+        "prompt_id=", payload.promptId,
+        "nodeTitle=", payload.nodeTitle,
+        "extrasKeys=", Object.keys(payload.extras || {}),
+      );
+
+      // Detection / segmentation extras ride alongside the standard
+      // params.  The Python operator pulls them from ctx.params with
+      // snake_case keys; everything else uses the existing channels.
+      const extras = payload.extras || {};
       try {
         await saveExecutor.execute({
           sample_id: currentSampleId,
@@ -532,6 +590,16 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
           text_value: payload.textValue || "",
           copy_labels: copyLabels,
           active_slice: activeSliceForSave ?? "",
+          // Detection-specific (passed verbatim, ignored by other types)
+          image_height: extras.imageHeight ?? 0,
+          image_width: extras.imageWidth ?? 0,
+          boxes_json: extras.boxesJson ?? "",
+          pred_labels_json: extras.predLabelsJson ?? "",
+          scores_json: extras.scoresJson ?? "",
+          masks_filename: extras.masksFilename ?? "",
+          fallback_labels: extras.fallbackLabels ?? "",
+          // Segmentation-specific
+          mask_targets: extras.maskTargets ?? "",
         });
 
         // Wait for the slice-list refresh so cachedSliceInfo is current
@@ -553,6 +621,16 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
           _DBG("executeSave: depth save complete, raising refresh banner");
           _module.depthSavedNotice = true;
           setShowDepthSavedBanner(true);
+        }
+
+        // Detections / segmentation saves with masks have the same
+        // caching pitfall as heatmaps — newly attached masks often
+        // don't render until the page is refreshed.  Banner reminds
+        // the user.
+        if (outputType === "detections" || outputType === "segmentation") {
+          _DBG(`executeSave: ${outputType} save complete, raising refresh banner`);
+          _module.maskSavedNotice = true;
+          setShowMaskSavedBanner(true);
         }
 
         _DBG("executeSave: triggering dataset reload via panel method");
@@ -620,7 +698,20 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
       _DBG("postMessage(cb): received type=", msgType);
 
       if (msgType === MSG.OUTPUT_READY) {
-        _DBG("postMessage(cb): OUTPUT_READY, outputType=", data.outputType, "nodeTitle=", data.nodeTitle, "promptId=", data.promptId, "workflowName=", data.workflowName, "filename=", data.filename, "autoSave=", data.autoSave, "saveMode=", data.saveMode, "fieldName=", data.fieldName, "copyLabels=", data.copyLabels, "hasImageData=", !!data.imageDataBase64);
+        // Don't dump `extras` — for detections it can hold MBs of JSON.
+        // The bridge already logs a structured per-type summary.
+        _DBG(
+          "postMessage(cb): OUTPUT_READY",
+          "outputType=", data.outputType,
+          "nodeTitle=", data.nodeTitle,
+          "saveMode=", data.saveMode,
+          "fieldName=", data.fieldName,
+          "autoSave=", !!data.autoSave,
+          "promptId=", data.promptId,
+          "filename=", data.filename || "(empty)",
+          "copyLabels=", data.copyLabels || "(empty)",
+          "hasImageData=", !!data.imageDataBase64,
+        );
         handleOutput({
           outputType: data.outputType || "image",
           nodeTitle: data.nodeTitle || "",
@@ -635,6 +726,7 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
           saveMode: data.saveMode,
           fieldName: data.fieldName,
           copyLabels: data.copyLabels,
+          extras: data.extras,
         });
         return;
       }
@@ -718,17 +810,80 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
     iframeRef.current = iframe;
 
     // Position the iframe over the container using fixed coordinates.
-    // NOTE: Do NOT set pointerEvents here — that is managed exclusively
-    // by the dialog z-index effect to avoid a race condition where this
-    // 500ms interval overrides the "none" set while a dialog is open.
+    //
+    // Visibility logic:
+    //   - container offscreen / 0-sized / display:none ancestor →
+    //     hide AND disable pointer events (otherwise the iframe stays
+    //     parked at z-index 9999 covering whatever the user is now
+    //     looking at, e.g. another panel in a split view).
+    //   - container visible → show and let the dialog effect own
+    //     pointer-events.
+    //
+    // We also clamp the iframe's rect to the viewport so it can't
+    // bleed past the actual screen area in any pathological layout.
+    let lastSig = "";
+    let lastVisible: boolean | null = null;
     const positionIframe = () => {
       if (!iframe || !container) return;
+
+      // checkVisibility() (Chromium 105+, FF 125+) handles display:none,
+      // visibility:hidden, and content-visibility uniformly.  Fallback
+      // to offsetParent + getComputedStyle for older browsers.
+      let containerVisible: boolean;
+      const checkFn = (container as any).checkVisibility?.bind(container);
+      if (typeof checkFn === "function") {
+        containerVisible = checkFn({ checkVisibilityCSS: true, contentVisibilityAuto: true });
+      } else {
+        const cs = getComputedStyle(container);
+        containerVisible =
+          container.offsetParent !== null &&
+          cs.visibility !== "hidden" &&
+          cs.display !== "none";
+      }
+
       const rect = container.getBoundingClientRect();
-      iframe.style.top = `${rect.top}px`;
-      iframe.style.left = `${rect.left}px`;
-      iframe.style.width = `${rect.width}px`;
-      iframe.style.height = `${rect.height}px`;
+      const hasArea = rect.width > 0 && rect.height > 0;
+
+      if (!containerVisible || !hasArea) {
+        if (lastVisible !== false) {
+          _DBG("positionIframe: container HIDDEN (visible=", containerVisible, "rect=", rect, ") → hiding iframe");
+          lastVisible = false;
+        }
+        iframe.style.visibility = "hidden";
+        iframe.style.pointerEvents = "none";
+        return;
+      }
+
+      // Clamp to the viewport so the iframe never overlaps anything
+      // outside the visible window — defensive against layouts where
+      // a parent has overflow that pushes the rect partially off-screen.
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const clampedTop = Math.max(0, rect.top);
+      const clampedLeft = Math.max(0, rect.left);
+      const clampedWidth = Math.max(0, Math.min(rect.right, vw) - clampedLeft);
+      const clampedHeight = Math.max(0, Math.min(rect.bottom, vh) - clampedTop);
+
+      iframe.style.top = `${clampedTop}px`;
+      iframe.style.left = `${clampedLeft}px`;
+      iframe.style.width = `${clampedWidth}px`;
+      iframe.style.height = `${clampedHeight}px`;
       iframe.style.visibility = "visible";
+      // Restore interactivity if we previously parked the iframe in
+      // pointer-events:none.  The dialog effect (separate useEffect)
+      // owns the "behind dialog" override; we only flip back to "auto"
+      // if no dialog is currently open.  We read it via a ref so this
+      // function can stay idempotent across React renders.
+      if (!_dialogOpenRef.current) {
+        iframe.style.pointerEvents = "auto";
+      }
+
+      const sig = `${clampedTop},${clampedLeft},${clampedWidth},${clampedHeight}`;
+      if (sig !== lastSig || lastVisible !== true) {
+        _DBG("positionIframe: container VISIBLE → iframe rect=", sig);
+        lastSig = sig;
+        lastVisible = true;
+      }
     };
 
     positionIframe();
@@ -736,11 +891,18 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
     // Re-position on resize / scroll / layout shifts.
     const observer = new ResizeObserver(positionIframe);
     observer.observe(container);
+    // Also re-position on viewport resize and on window scroll — split
+    // view drag-resize emits scroll events on ancestor scrollers but
+    // not always ResizeObserver entries.
+    window.addEventListener("resize", positionIframe);
+    window.addEventListener("scroll", positionIframe, true);
     const interval = setInterval(positionIframe, 500);
 
     return () => {
       _DBG("iframe effect CLEANUP: HIDING iframe (NOT removing from DOM)");
       observer.disconnect();
+      window.removeEventListener("resize", positionIframe);
+      window.removeEventListener("scroll", positionIframe, true);
       clearInterval(interval);
       if (iframe) {
         iframe.style.visibility = "hidden";
@@ -762,6 +924,7 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
   const dialogOpen = hostDialogOpen || !!templateNameDialog;
 
   useEffect(() => {
+    _dialogOpenRef.current = dialogOpen;
     const iframe = _module.persistedIframe;
     if (!iframe) return;
     if (dialogOpen) {
@@ -961,80 +1124,67 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
 
   const showIframe = serverStatus === "ready" && iframeUrl;
 
-  const dismissFlatGroupedBanner = () => {
-    _module.flatGroupedNotice = false;
-    setShowFlatGroupedBanner(false);
-  };
-
-  const dismissDepthSavedBanner = () => {
-    _module.depthSavedNotice = false;
-    setShowDepthSavedBanner(false);
-  };
-
-  // Both notice banners use the same yellow styling.  Hoisted so each
-  // instance stays consistent without duplicating literals.
-  const noticeBannerStyle = {
-    backgroundColor: "#FFEB52",
-    color: "#1a1a2e",
-    padding: "10px 16px",
-    display: "flex",
-    alignItems: "center",
-    gap: "12px",
-    fontSize: FONT.md,
-    flexShrink: 0,
-    borderBottom: "1px solid rgba(0,0,0,0.15)",
-  } as const;
-  const noticeDismissStyle = {
-    background: "transparent",
-    border: "1px solid rgba(0,0,0,0.4)",
-    color: "#1a1a2e",
-    borderRadius: "4px",
-    padding: "4px 12px",
-    fontSize: FONT.sm,
-    cursor: "pointer",
-    fontWeight: 600,
-  } as const;
+  // All notice banners use the same yellow styling and dismiss button.
+  // Each banner is gated by a (state, setter, _module-mirror-key) trio so
+  // the displayed/dismissed state survives panel unmount/remount.
+  const banners: {
+    key: string;
+    visible: boolean;
+    title: string;
+    body: string;
+    onDismiss: () => void;
+  }[] = [
+    {
+      key: "flat-grouped",
+      visible: showFlatGroupedBanner,
+      title: "Dataset converted to grouped.",
+      body:
+        "Once the job finishes: refresh the browser, close the sample " +
+        "modal, then reopen it to see the new slice(s).",
+      onDismiss: () => {
+        _module.flatGroupedNotice = false;
+        setShowFlatGroupedBanner(false);
+      },
+    },
+    {
+      key: "depth-saved",
+      visible: showDepthSavedBanner,
+      title: "Depth map saved.",
+      body: "Refresh the browser to see the heatmap on the sample.",
+      onDismiss: () => {
+        _module.depthSavedNotice = false;
+        setShowDepthSavedBanner(false);
+      },
+    },
+    {
+      key: "mask-saved",
+      visible: showMaskSavedBanner,
+      title: "Detections / segmentation saved.",
+      body: "Refresh the browser to see the masks on the sample.",
+      onDismiss: () => {
+        _module.maskSavedNotice = false;
+        setShowMaskSavedBanner(false);
+      },
+    },
+  ];
 
   return (
     <div style={STYLES.container}>
-      {/* One-time banner shown right after the dataset is converted from
-          flat to grouped.  FiftyOne's modal does not pick up the new
-          group structure without a hard browser refresh + reopen, so we
-          tell the user explicitly. */}
-      {showFlatGroupedBanner && (
-        <div style={noticeBannerStyle}>
-          <strong>Dataset converted to grouped.</strong>
-          <span style={{ flex: 1 }}>
-            Once the job finishes: refresh the browser, close the sample modal, then reopen it to see the new slice(s).
-          </span>
-          <button
-            onClick={dismissFlatGroupedBanner}
-            style={noticeDismissStyle}
-            aria-label="Dismiss notice"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
-
-      {/* Banner shown after every depth-heatmap save.  FiftyOne's
-          heatmap renderer often won't pick up the freshly saved data
-          without a browser refresh. */}
-      {showDepthSavedBanner && (
-        <div style={noticeBannerStyle}>
-          <strong>Depth map saved.</strong>
-          <span style={{ flex: 1 }}>
-            Refresh the browser to see the heatmap on the sample.
-          </span>
-          <button
-            onClick={dismissDepthSavedBanner}
-            style={noticeDismissStyle}
-            aria-label="Dismiss notice"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
+      {banners
+        .filter((b) => b.visible)
+        .map((b) => (
+          <div key={b.key} style={STYLES.noticeBanner}>
+            <strong>{b.title}</strong>
+            <span style={{ flex: 1 }}>{b.body}</span>
+            <button
+              onClick={b.onDismiss}
+              style={STYLES.noticeDismiss}
+              aria-label="Dismiss notice"
+            >
+              Dismiss
+            </button>
+          </div>
+        ))}
 
       {/* Save dialog is rendered in a separate React root via dialogHost.tsx */}
 

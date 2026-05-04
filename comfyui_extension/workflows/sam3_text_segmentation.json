@@ -1,0 +1,86 @@
+{
+  "id": "sam3-text-segmentation-v1",
+  "revision": 0,
+  "last_node_id": 4,
+  "last_link_id": 3,
+  "version": 0.4,
+  "config": {},
+  "extra": {
+    "ds": { "scale": 0.9, "offset": [0, 0] }
+  },
+  "groups": [],
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [40, 200],
+      "size": [315, 314],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "links": [1], "slot_index": 0 },
+        { "name": "MASK",  "type": "MASK",  "links": null, "slot_index": 1 }
+      ],
+      "properties": { "Node name for S&R": "LoadImage" },
+      "widgets_values": ["fo_current_sample.png", "image"]
+    },
+    {
+      "id": 2,
+      "type": "LoadSAM3Model",
+      "pos": [40, 540],
+      "size": [330, 80],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "sam3_model_config", "type": "SAM3_MODEL_CONFIG", "links": [2], "slot_index": 0 }
+      ],
+      "properties": { "Node name for S&R": "LoadSAM3Model" },
+      "widgets_values": []
+    },
+    {
+      "id": 3,
+      "type": "SAM3Grounding",
+      "pos": [420, 200],
+      "size": [380, 200],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        { "name": "sam3_model_config", "type": "SAM3_MODEL_CONFIG", "link": 2 },
+        { "name": "image",             "type": "IMAGE",             "link": 1 }
+      ],
+      "outputs": [
+        { "name": "masks",         "type": "MASK",   "links": [3], "slot_index": 0 },
+        { "name": "visualization", "type": "IMAGE",  "links": null, "slot_index": 1 },
+        { "name": "boxes",         "type": "STRING", "links": null, "slot_index": 2 },
+        { "name": "scores",        "type": "STRING", "links": null, "slot_index": 3 }
+      ],
+      "properties": { "Node name for S&R": "SAM3Grounding" },
+      "widgets_values": [0.2, "person", -1]
+    },
+    {
+      "id": 4,
+      "type": "FO_SaveSegmentation",
+      "pos": [860, 200],
+      "size": [340, 130],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        { "name": "mask", "type": "MASK", "link": 3 }
+      ],
+      "outputs": [],
+      "properties": { "Node name for S&R": "FO_SaveSegmentation" },
+      "widgets_values": ["segmentation", ""]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 3, 1, "IMAGE"],
+    [2, 2, 0, 3, 0, "SAM3_MODEL_CONFIG"],
+    [3, 3, 0, 4, 0, "MASK"]
+  ]
+}
