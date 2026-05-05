@@ -32,9 +32,9 @@ def _unique_suffix():
     Used to keep filenames unique within ComfyUI's output dir without
     relying on a counter (the node has no persistent state across
     workflow runs).  The mod-10M wraparound keeps filenames short; a
-    real collision would require two saves within the same millisecond
-    *and* exactly 10M ms apart, which is acceptable for a temp-output
-    directory.
+    collision requires two saves whose millisecond timestamps either
+    coincide or differ by an exact multiple of 10,000,000 ms (~167
+    minutes).  Acceptable for a temp-output directory.
     """
     return f"{int(time.time() * 1000) % 10_000_000:07d}"
 

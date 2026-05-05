@@ -17,9 +17,10 @@ Architecture
 
 ``SaveComfyOutput`` (foo.Operator)
     Unlisted operator invoked from React via ``useOperatorExecutor``.
-    Supports multiple output types (image, video, text, depth) and
-    multiple destinations (group slice, new sample, string field,
-    classification, heatmap).  Fetches metadata from ComfyUI's
+    Supports seven output types (image, video, text, depth, detections,
+    segmentation, 3d) and multiple destinations (group slice, new
+    sample, string field, classification, heatmap, ``fo.Detections``
+    field, ``fo.Segmentation`` field).  Fetches metadata from ComfyUI's
     ``/history`` endpoint and stores generation parameters on the
     saved sample.
 
@@ -103,10 +104,17 @@ else:
 
 
 def _get_config(ctx) -> dict:
-    """Read plugin configuration from the execution store."""
+    """Read plugin configuration from the execution store.
+
+    ``comfyui_path`` is run through ``os.path.expanduser`` so that
+    user-supplied values like ``~/comfy/ComfyUI`` resolve.  Idempotent
+    on absolute paths.
+    """
     store = ctx.store("comfyui_plugin_config")
     return {
-        "comfyui_path": store.get("comfyui_path") or DEFAULT_COMFYUI_PATH,
+        "comfyui_path": os.path.expanduser(
+            store.get("comfyui_path") or DEFAULT_COMFYUI_PATH
+        ),
         "comfyui_port": int(store.get("comfyui_port") or DEFAULT_COMFYUI_PORT),
         "comfyui_args": store.get("comfyui_args") or [],
     }
@@ -328,8 +336,8 @@ def _inject_sample(
     if os.path.lexists(dst):
         os.remove(dst)
 
-    img = Image.open(filepath)
-    img.save(dst, "PNG")
+    with Image.open(filepath) as img:
+        img.save(dst, "PNG")
     return target_filename
 
 
@@ -1193,6 +1201,11 @@ class ComfyUIPanel(foo.Panel):
         if not template_id:
             return {"error": "No template_id provided"}
 
+        # Constrain to the same slug shape ``save_template`` produces so
+        # ``..`` / ``/`` / absolute paths can't escape ``TEMPLATES_DIR``.
+        if not re.fullmatch(r"[a-z0-9_]+", template_id):
+            return {"error": f"Invalid template_id: {template_id!r}"}
+
         template_path = os.path.join(TEMPLATES_DIR, f"{template_id}.json")
         if not os.path.isfile(template_path):
             return {"error": f"Template not found: {template_id}"}
@@ -1485,9 +1498,10 @@ def _fetch_file_from_comfyui(port: int, filename: str, subfolder: str = "") -> b
 class SaveComfyOutput(foo.Operator):
     """Save output from ComfyUI to the FiftyOne dataset.
 
-    Supports multiple output types (image, video, text, depth) and
-    multiple destinations (group slice, new sample, string field,
-    classification, heatmap).  Fetches metadata from ComfyUI's
+    Supports seven output types (image, video, text, depth, detections,
+    segmentation, 3d) and multiple destinations (group slice, new
+    sample, string field, classification, heatmap, ``fo.Detections``
+    field, ``fo.Segmentation`` field).  Fetches metadata from ComfyUI's
     ``/history`` endpoint and stores generation parameters.
     """
 

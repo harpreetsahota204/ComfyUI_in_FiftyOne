@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { usePanelEvent } from "@fiftyone/operators";
 
 /**
@@ -19,10 +19,18 @@ export interface PanelMethodUris {
 
 export function usePluginClient(uris: PanelMethodUris) {
   const handleEvent = usePanelEvent();
+  // Refs are updated in effects (not during render) so concurrent /
+  // StrictMode double-invocation doesn't observe a half-updated ref.
+  // The ``call`` callback below memoizes with deps ``[]`` and reads
+  // these refs lazily, so the latest values are always used.
   const handleEventRef = useRef(handleEvent);
-  handleEventRef.current = handleEvent;
+  useEffect(() => {
+    handleEventRef.current = handleEvent;
+  }, [handleEvent]);
   const urisRef = useRef(uris);
-  urisRef.current = uris;
+  useEffect(() => {
+    urisRef.current = uris;
+  }, [uris]);
 
   const call = useCallback(
     <T = Record<string, any>>(

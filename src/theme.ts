@@ -12,6 +12,7 @@ export const COLORS = {
   danger: "#7b2d26",
   warning: "#f0a500",
   error: "#e74c3c",
+  noticeYellow: "#FFEB52",
 } as const;
 
 export const FONT = {

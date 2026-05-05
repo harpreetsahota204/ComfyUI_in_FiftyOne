@@ -336,9 +336,9 @@ app.registerExtension({
       );
     });
 
-    // By the time extension setup() runs, the app and graph are already
-    // initialized.  The WS `status` event may have fired before we
-    // registered our listener, so we send BRIDGE_READY directly from here.
+    // ComfyUI loads this extension asynchronously and only invokes
+    // ``setup()`` once the app + graph are already initialized, so it's
+    // safe to announce readiness to the parent panel immediately.
     _DBG("setup: sending BRIDGE_READY to parent immediately");
     window.parent.postMessage({ type: MSG.BRIDGE_READY }, "*");
 
@@ -467,6 +467,9 @@ function resizeNode(node) {
 }
 
 function getSuggestionsForNode(node) {
+  // Only ever called from setupSliceWidget — i.e. for SLICE_NODE_CLASSES.
+  // FO_SaveDepth attaches its own ``_foGetSuggestions`` directly in
+  // setupDepthWidget and never round-trips through here.
   if (SLICE_NODE_CLASSES.has(node.comfyClass)) {
     // SLICE_NODE_CLASSES and NODE_MEDIA_TYPE are kept in lock-step; every
     // entry here has a known expected media type.
@@ -474,9 +477,6 @@ function getSuggestionsForNode(node) {
     return availableSlices
       .filter((s) => s.mediaType === expectedMedia)
       .map((s) => s.name);
-  }
-  if (node.comfyClass === "FO_SaveDepth") {
-    return availableHeatmapFields;
   }
   return [];
 }
@@ -1138,6 +1138,14 @@ function refreshLoadImagePreviews() {
       }
       matchedCount++;
 
+      // Forcing the LoadImage preview to re-fetch when the FILENAME is
+      // unchanged but the on-disk BYTES have changed (sample paginated /
+      // slice switched) requires bouncing widget.value through a different
+      // string and back.  ComfyUI's LoadImage widget keys its internal
+      // preview cache on the value, so a no-op assignment to the same
+      // string is ignored.  Calling widget.callback alone is not enough.
+      // The mid-sequence value (``...?_=ts``) is never used as a URL — it
+      // exists only to make the value-change detector fire.
       node.imgs = null;
       widget.value = `fo_current_sample.png?_=${ts}`;
       widget.value = "fo_current_sample.png";

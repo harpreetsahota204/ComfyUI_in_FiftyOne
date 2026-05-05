@@ -44,9 +44,13 @@ export interface SliceInfo {
  * Optional extras carried for richer save payloads (detections /
  * segmentation).  Forwarded verbatim to ``SaveComfyOutput`` operator
  * params with snake_case keys (the React panel converts).
+ *
+ * Note: the bridge JS also writes a ``field`` key into extras, but it
+ * uses that key only locally to synthesize ``payload.fieldName``
+ * (which IS consumed here); ``extras.field`` itself is not read by
+ * the React panel, so it isn't part of this interface.
  */
 export interface OutputExtras {
-  field?: string;
   imageHeight?: number;
   imageWidth?: number;
   boxesJson?: string;

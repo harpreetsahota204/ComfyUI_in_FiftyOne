@@ -22,6 +22,7 @@ import { MSG } from "./messageTypes";
 import { onDialogStateChange, showSaveDialog } from "./dialogHost";
 
 const PLUGIN_NAME = "@harpreetsahota/comfyui-plugin";
+const DEFAULT_COMFY_PORT = 8188;
 const _DBG = (...args: any[]) => console.log("%c[fo-panel]", "color:#f0a500;font-weight:bold", ...args);
 
 // ---------------------------------------------------------------------------
@@ -207,8 +208,8 @@ const STYLES = {
     backgroundColor: COLORS.danger,
   },
   noticeBanner: {
-    backgroundColor: "#FFEB52",
-    color: "#1a1a2e",
+    backgroundColor: COLORS.noticeYellow,
+    color: COLORS.bg,
     padding: "10px 16px",
     display: "flex",
     alignItems: "center",
@@ -220,7 +221,7 @@ const STYLES = {
   noticeDismiss: {
     background: "transparent",
     border: "1px solid rgba(0,0,0,0.4)",
-    color: "#1a1a2e",
+    color: COLORS.bg,
     borderRadius: "4px",
     padding: "4px 12px",
     fontSize: FONT.sm,
@@ -321,7 +322,7 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
   const [serverStatus, setServerStatus] = useState<ServerStatus>(
     (c?.serverStatus as ServerStatus) || ""
   );
-  const [serverPort, setServerPort] = useState(c?.serverPort || 8188);
+  const [serverPort, setServerPort] = useState(c?.serverPort || DEFAULT_COMFY_PORT);
   const [serverError, setServerError] = useState("");
   const [iframeUrl, setIframeUrl] = useState(c?.iframeUrl || "");
   const [sampleFilename, setSampleFilename] = useState(c?.sampleFilename || "");
@@ -330,7 +331,7 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
   const [selectedTemplate, setSelectedTemplate] = useState<string>("");
   const [showSettings, setShowSettings] = useState(false);
   const [configPath, setConfigPath] = useState(c?.configPath || "");
-  const [configPort, setConfigPort] = useState(String(c?.serverPort || 8188));
+  const [configPort, setConfigPort] = useState(String(c?.serverPort || DEFAULT_COMFY_PORT));
   const [saving, setSaving] = useState(false);
   const [hostDialogOpen, setHostDialogOpen] = useState(false);
   const [lastAvailableOutputs, setLastAvailableOutputs] = useState<
@@ -375,7 +376,7 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
     const prev = _cachedServerState;
     _cachedServerState = {
       iframeUrl: result.iframe_url ?? prev?.iframeUrl ?? "",
-      serverPort: result.server_port ?? prev?.serverPort ?? 8188,
+      serverPort: result.server_port ?? prev?.serverPort ?? DEFAULT_COMFY_PORT,
       serverStatus: result.server_status ?? prev?.serverStatus ?? "",
       configPath: result.comfyui_path ?? prev?.configPath ?? "",
       sampleFilename: result.sample_filename ?? prev?.sampleFilename ?? "",
@@ -982,7 +983,7 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
   const handleSaveConfig = useCallback(async () => {
     await client.updateConfig({
       comfyui_path: configPath,
-      comfyui_port: parseInt(configPort, 10) || 8188,
+      comfyui_port: parseInt(configPort, 10) || DEFAULT_COMFY_PORT,
     });
     setShowSettings(false);
     setServerStatus("starting");
