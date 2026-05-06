@@ -1,58 +1,57 @@
 # FiftyOne ComfyUI Plugin
 
-Embed a full [ComfyUI](https://github.com/comfyanonymous/ComfyUI) instance inside the FiftyOne sample modal. Run any workflow against the current sample, and save outputs back to your dataset as group slices, new samples, fields, heatmaps, or classifications — with one click.
+Embed a full [ComfyUI](https://github.com/comfyanonymous/ComfyUI) instance inside the FiftyOne sample modal. Run any workflow against the current sample and save outputs back to your dataset — as group slices, new samples, fields, heatmaps, classifications, detections, segmentation masks, or 3D models.
 
 ---
 
 ## What this plugin does
 
-When you open a sample in FiftyOne, a new **ComfyUI** tab appears in the modal. That tab hosts a real ComfyUI instance in an embedded iframe — the same UI you'd get at `localhost:8188` — but wired into your dataset:
+Open a sample in FiftyOne. Click the **ComfyUI** tab. You get a real ComfyUI instance in an iframe — the same UI you'd hit at `localhost:8188`, just wired into your dataset:
 
-- The current sample's image is automatically copied into ComfyUI's input directory and exposed as `fo_current_sample.png`. Drop a `LoadImage` node, point it at that filename, and you're ready to go.
-- Every group slice on the sample is also exposed as `fo_current_sample_<slice>.png` for multi-input workflows.
-- The plugin ships custom **save nodes** (`Save Image to FiftyOne`, `Save Video to FiftyOne`, `Save Text to FiftyOne`, `Save Depth to FiftyOne`, `Save Detections to FiftyOne`, `Save Segmentation to FiftyOne`, `Save 3D to FiftyOne`) that send outputs back to FiftyOne with no further clicks.
-- A right-click menu also lets you save outputs from any image-producing ComfyUI node directly to the dataset, or convert a native `SaveImage` node into a `FO_SaveImage` in one action.
-- Saves can land as a **new group slice**, a **new sample**, a **`fo.Heatmap`** field, a **`fo.Classification`** field, a **string field**, a **`fo.Detections`** field, or a **`fo.Segmentation`** field — depending on output type and your choice.
-- **Bundled object-detection and segmentation** — `ComfyUI-Grounding` (GroundingDINO, MM-GroundingDINO, OWLv2, Florence-2, YOLO-World, SAM2) and `ComfyUI-SAM3` (text/click/box-prompted segmentation, including interactive collectors) are vendored into the plugin and installed automatically alongside the bridge.
-- Optionally copy any subset of the source sample's `fo.Label` fields onto the new sample.
-- 19 starter workflow templates ship with the plugin (including `Grounding (DINO) → Detections` and `SAM3 (Text) → Segmentation`); you can save your own. Templates also surface in ComfyUI's native *Workflow Templates* tab under the `fiftyone_bridge` group.
+- **Your sample is already in ComfyUI's input directory** as `fo_current_sample.png`. Drop a `LoadImage` node, point it at that filename, and you're ready.
+- **Outputs go back to FiftyOne automatically** when you use any of the bundled `FO_Save*` nodes. No download/upload, no copy-paste.
+- **Right-click any image-producing node** → "Save Image to FiftyOne" — for one-off saves without modifying the workflow.
+- **19 starter workflow templates** ship with the plugin, including object detection (Grounding DINO) and segmentation (SAM3).
+- **Bundled detection + segmentation packs** — `ComfyUI-Grounding` and `ComfyUI-SAM3` are vendored and installed automatically.
 
 ---
 
 ## Requirements
 
 - **FiftyOne** ≥ 0.25
-- **Python** ≥ 3.9 (matching your FiftyOne install)
-- **ComfyUI** — installed and reachable on disk. The plugin spawns it on demand and reuses an existing process if one is running.
-- **ffmpeg** on `$PATH` — only needed if you'll save raw video frames via `FO_SaveVideo`. Saving existing video files (e.g. from `VHS_VideoCombine`) works without it.
-- **CUDA-capable GPU with ≥ 6 GB VRAM** — only required for the bundled `ComfyUI-Grounding` / `ComfyUI-SAM3` detection / segmentation pipelines. Other workflows (image edits, upscaling, captioning, etc.) work on CPU or smaller GPUs.
-- **Disk space** — `pip install -r requirements.txt` pulls roughly **2-4 GB** of ML dependencies on first install (`transformers`, `ultralytics`, `huggingface_hub`, `comfy-env`, etc.). Allow a few minutes.
+- **Python** ≥ 3.9
+- **ComfyUI** — see install instructions below
+- **CUDA-capable GPU** (≥ 6 GB VRAM) — only for the bundled detection / segmentation pipelines. Other workflows work on CPU.
+- **ffmpeg** on `$PATH` — only if you want to encode raw video frames via `FO_SaveVideo`.
+
+First-time `pip install -r requirements.txt` pulls ~2-4 GB of ML dependencies (`transformers`, `huggingface_hub`, etc.). Allow a few minutes.
 
 ---
 
 ## Installation
 
-### 1. Get ComfyUI running on your machine
+### 1. Install ComfyUI
 
-If you don't already have it:
+The simplest path is the official `comfy-cli` tool:
 
 ```bash
-git clone https://github.com/comfyanonymous/ComfyUI
-cd ComfyUI
-pip install -r requirements.txt
+pip install comfy-cli
+comfy install
 ```
 
-Note the absolute path to your `ComfyUI` directory — you'll point the plugin at it in step 3.
+This drops ComfyUI at `~/comfy/ComfyUI` — exactly where the plugin looks by default. You don't need to launch ComfyUI yourself; the plugin will start it on demand.
 
-### 2. Register the plugin with FiftyOne
+If you already have ComfyUI installed somewhere else, that's fine — you'll point the plugin at it via the **Settings** button on first open (see [Configuration](#configuration)).
 
-From this repo's root:
+### 2. Install the plugin
+
+From this repo:
 
 ```bash
 fiftyone plugins download <path-to-this-repo> --plugin-names "@harpreetsahota/comfyui-plugin"
 ```
 
-Or symlink/copy `comfyui-plugin/` into your FiftyOne plugins directory:
+Or symlink it into your FiftyOne plugins directory:
 
 ```bash
 ln -s "$(pwd)/comfyui-plugin" "$(fiftyone config plugins_dir)/comfyui-plugin"
@@ -66,11 +65,13 @@ npm install
 npm run build
 ```
 
-This produces `dist/index.umd.js`, which FiftyOne loads as the panel's frontend.
+This produces `dist/index.umd.js`, which FiftyOne loads as the panel's UI.
 
-### 4. Tell the plugin where ComfyUI lives
+### 4. Install Python dependencies
 
-By default the plugin looks for ComfyUI at `~/comfy/ComfyUI`. If yours is elsewhere, you'll set it the first time you open the panel (via the **Settings** button — see *Configuration* below).
+```bash
+pip install -r requirements.txt
+```
 
 ### 5. Launch FiftyOne
 
@@ -78,274 +79,291 @@ By default the plugin looks for ComfyUI at `~/comfy/ComfyUI`. If yours is elsewh
 fiftyone app launch
 ```
 
-When you open a sample modal, the **ComfyUI** tab appears alongside the existing tabs.
+Open any sample. The **ComfyUI** tab appears in the modal.
 
 ---
 
-## Quick start
+## Using the plugin
 
-1. Open a sample in the modal (any image, video, or 3D sample).
-2. Click the **ComfyUI** tab.
-3. The plugin spawns ComfyUI on first use (takes ~10-30 seconds while models load). The panel shows a spinner; subsequent opens reuse the same process and are instant.
-4. ComfyUI's iframe loads with a starter workflow: `LoadImage("fo_current_sample.png") → PreviewImage` plus a pre-wired `FO_SaveImage`.
-5. Either:
-   - **Use a template**: click the *Load template…* dropdown in the toolbar and pick from 17 built-in workflows.
-   - **Build your own**: drag in nodes as usual, leave a `LoadImage` pointed at `fo_current_sample.png` for the current image input.
-6. Click **Queue** (ComfyUI's run button) to run the workflow.
-7. When outputs arrive they're saved back to FiftyOne automatically (if you used an `FO_Save*` node) or via right-click (see below).
+> **Building workflows works exactly like standard ComfyUI.** All the same nodes, same drag-and-drop graph editor, same Queue button, same right-click menus. The plugin doesn't reinvent ComfyUI — it embeds it. The only differences are:
+>
+> 1. Your current sample is already available as `fo_current_sample.png` in the LoadImage dropdown.
+> 2. The `FO_Save*` nodes (under the **FiftyOne/IO** category) ship outputs back to your dataset.
 
----
+The flow:
 
-## Saving outputs
-
-There are three ways to get a workflow's output into FiftyOne. Pick whichever fits your style:
-
-### A. `FO_Save*` nodes (recommended)
-
-Drop one of these into your workflow:
-
-| Node | Saves as | Destination options |
-|---|---|---|
-| **`FO_SaveImage`** | image | new sample · group slice |
-| **`FO_SaveVideo`** | H.264 MP4 | new sample · group slice |
-| **`FO_SaveText`** | string field on the current sample | string field · classification |
-| **`FO_SaveDepth`** | `fo.Heatmap` field on the current sample | (heatmap field name) |
-| **`FO_SaveDetections`** | `fo.Detections` field on the current sample | (detections field name) |
-| **`FO_SaveSegmentation`** | `fo.Segmentation` field on the current sample | (segmentation field name) |
-| **`FO_Save3D`** | `media_type="3d"` sample (`.glb / .ply / .obj / .stl / .fbx / .pcd`) | new sample · group slice |
-
-The detection node is **polymorphic** — it accepts both ComfyUI-Grounding outputs (`BBOX` lists, `STRING` labels, `FLOAT` scores, `MASK` per-instance masks) and ComfyUI-SAM3 outputs (`STRING`-JSON boxes/scores, `MASK` per-instance masks) on the same input slots. Hook up whatever your detector emits; the operator figures out the format. The optional `labels` widget is a multi-pill picker of fallback class names — used only when the upstream model doesn't emit per-detection labels (cycled round-robin).
-
-When the workflow finishes, the save fires automatically — no dialog, no click. The node has widgets for:
-
-- **`save_mode`** (image/video only) — `new_sample` or `group_slice`. Defaults to `new_sample`.
-- **`name`** — slice name (when `group_slice`) or field name (text / depth).
-- **`labels`** — optional **Copy labels** picker (see below). Defaults to none.
-
-### B. Right-click on any node with image output → "Save Image to FiftyOne"
-
-Right-click any ComfyUI node that has an `IMAGE` output and pick **Save Image to FiftyOne**. A dialog pops up letting you pick:
-
-- Save destination (new sample / group slice).
-- A name for the slice/file.
-- Which `fo.Label` fields to copy from the source sample (multi-select pill picker).
-
-This is a **one-shot save** — it takes whatever's currently displayed by the node and ships it to FiftyOne. The workflow itself is unchanged.
-
-### C. Right-click a native ComfyUI `SaveImage` → "Convert to Save Image to FiftyOne"
-
-If you've loaded an existing ComfyUI workflow that uses the native `SaveImage` node, right-click it and pick **Convert to Save Image to FiftyOne**. The node is replaced with `FO_SaveImage` at the same position with the IMAGE input wire reconnected. Future runs auto-save through the FiftyOne pipeline.
+1. Open a sample modal.
+2. Click the **ComfyUI** tab. (First time: ~10-30 seconds while ComfyUI spins up. Subsequent opens are instant.)
+3. Either pick a starter from the **Load template…** dropdown, or build a workflow yourself.
+4. Click **Queue** (ComfyUI's run button).
+5. Output lands in your dataset automatically (if you used an `FO_Save*` node) or via right-click (see below).
 
 ---
 
-## Save destinations explained
+## FiftyOne I/O nodes
 
-### Group slice
+All seven save nodes live under **FiftyOne/IO** in ComfyUI's node browser. Drop them into any workflow.
 
-Saves create a new `fo.Sample` in the same group as the source, on a slice named after your `name` widget (or the value you typed in the Save dialog).
+| Node | Inputs | Output type | Widget options | Lands in FiftyOne as |
+|---|---|---|---|---|
+| **`FO_SaveImage`** | `image: IMAGE` | image | `save_mode`, `name`, `labels` | new sample · group slice |
+| **`FO_SaveVideo`** | `video: ANY` (frames / file path / VHS_FILENAMES) | H.264 MP4 | `fps`, `save_mode`, `name`, `labels` | new sample · group slice |
+| **`FO_SaveText`** | `text: STRING` | text | `name` | string field on current sample |
+| **`FO_SaveDepth`** | `depth: IMAGE` (depth map as 3-channel image) | depth (PNG) | `name` | `fo.Heatmap` field on current sample |
+| **`FO_SaveDetections`** | `boxes`, `pred_labels`, `scores`, `masks`, `image` (all optional) | detections | `field`, `labels` (fallback class names) | `fo.Detections` field on current sample |
+| **`FO_SaveSegmentation`** | `mask: MASK` | segmentation | `field`, `mask_targets` | `fo.Segmentation` field on current sample |
+| **`FO_Save3D`** | `model: ANY` (filepath / File3D / MESH tensor) | 3D model (.glb / .ply / .obj / .stl / .fbx / .pcd) | `save_mode`, `name`, `labels` | new sample · group slice (`media_type="3d"`) |
 
-If your dataset is **flat** (no group field), the first `group_slice` save converts it to a grouped dataset. The original sample becomes the `original` slice, and the save lands on a new slice. **You'll see a yellow banner asking you to refresh the browser and reopen the sample modal once the workflow finishes** — FiftyOne's modal does not pick up the new group structure mid-flight.
+There's also **`FO_LoadImage`** (also under FiftyOne/IO) — a thin alias for the built-in `LoadImage`, listed here for discoverability.
 
-### New sample
+### Widget reference
 
-Saves create a brand-new `fo.Sample` with `tags=["comfy_output"]` and a `source_sample_id` field linking back to the source. In a grouped dataset, the new sample gets its own fresh group on a slice that matches its media type (image vs. video).
+- **`save_mode`** (`FO_SaveImage` / `FO_SaveVideo` / `FO_Save3D`) — `new_sample` or `group_slice`. Defaults to `new_sample`.
+- **`name`** — slice name (when `save_mode=group_slice`), or field name (text/depth/detections/segmentation).
+- **`labels`** — see [Copy labels](#copy-labels-optional) below. On `FO_SaveDetections` it's *fallback class names*, used only when the upstream model doesn't provide them.
+- **`field`** (`FO_SaveDetections` / `FO_SaveSegmentation`) — the FiftyOne field name to write to.
+- **`mask_targets`** (`FO_SaveSegmentation`) — optional class-index → label mapping. JSON or `key=value,key=value`.
 
-### Heatmap (depth saves)
+### Polymorphic inputs
 
-`FO_SaveDepth` writes the depth map as a PNG and attaches it to the current sample as a `fo.Heatmap` field with `map_path` pointing at the file. **You'll see a banner asking you to refresh the browser** to see the heatmap render — FiftyOne's heatmap layer caches aggressively and won't pick up the new field without a refresh.
+`FO_SaveDetections` accepts the output shape of either bundled detector pack on the same sockets:
 
-### String field / Classification (text saves)
+- **ComfyUI-Grounding**: `BBOX` lists, `STRING` labels, `FLOAT` scores, `MASK` per-instance masks.
+- **ComfyUI-SAM3**: `STRING`-JSON boxes / scores, `MASK` per-instance masks.
 
-`FO_SaveText` writes the text to a field on the current sample. Either as a plain `StringField` (default) or wrapped in `fo.Classification(label=text)` if you pick that destination from the dialog.
+You can also connect just `masks` (e.g. SAM2 output) — bboxes are auto-derived via tight enclosure.
 
-### Detections / Segmentation field
+`FO_SaveVideo` accepts an `IMAGE` batch (frames), a filepath string, a `VHS_FILENAMES` tuple, or any dict containing a `path`/`filename` key.
 
-`FO_SaveDetections` writes per-instance bounding boxes (and optional labels, scores, masks) onto the current sample as `fo.Detections`. Pixel-space xyxy boxes are converted to FiftyOne's normalized rxywh, and per-instance masks are cropped to their bbox before being attached to `fo.Detection.mask`.
+`FO_Save3D` accepts a filepath string, a `File3D`-style wrapper with a `.save_to(path)` method, or a `MESH` tensor (delegated to ComfyUI's built-in `save_glb` for serialization — same path the native `SaveGLB` node uses).
 
-`FO_SaveSegmentation` writes a single semantic segmentation mask as `fo.Segmentation` on the current sample. The mask is stored on disk via `mask_path` next to the source sample's filepath (no in-memory conversion at view time). If the upstream `MASK` is multi-instance, the node argmaxes along the leading axis to produce an indexed map.
+---
 
-### 3D model (mesh / point cloud)
+## Save destinations
 
-`FO_Save3D` accepts any of the following on its `model` socket and writes a single asset file alongside the source sample with `media_type="3d"`:
+### `new_sample`
 
-- **Filepath strings** ending in `.glb / .gltf / .obj / .ply / .stl / .fbx / .pcd / .fo3d` — preserved verbatim. Use this when an upstream node has already saved a file (e.g. TripoSR, Comfy3D-Pack savers).
-- **File3D objects** (ComfyUI's V3 type system) — saved via their own `.save_to(path)` method, preserving their format (GLB / OBJ / etc.).
-- **MESH tensors** (the type emitted by `VoxelToMesh`, Hunyuan3D, and most pack-native MESH outputs) — serialized to GLB by **delegating to ComfyUI's built-in `save_glb` helper** (the same one its native 'Save 3D Model' / `SaveGLB` node uses). This means we inherit ComfyUI's batch / dtype / format handling for free, with no extra dependencies.
+Creates a brand-new `fo.Sample` with `tags=["comfy_output"]` and a `source_sample_id` linking back to the source. In a grouped dataset, the new sample gets its own fresh group on a slice matching its media type.
 
-GLB is the canonical output format for MESH inputs — the same FiftyOne recommends in its [3D datasets docs](https://docs.voxel51.com/user_guide/using_datasets.html#d-datasets) and the format ComfyUI itself produces.
+### `group_slice`
 
-The new sample stores `media_type="3d"` and FiftyOne renders it via the App's 3D viewer. Note that the grid view shows a placeholder until you generate orthographic projection thumbnails (`fou3d.compute_orthographic_projection_images()` — not done automatically by the plugin).
+Creates a new sample in the **same group** as the source, on a slice named after your `name` widget. If your dataset is flat, the first such save converts it to a grouped dataset (and a yellow banner asks you to refresh the browser to pick up the new group structure).
+
+### `fo.Heatmap` field — `FO_SaveDepth`
+
+Writes the depth PNG and attaches it to the current sample as a `fo.Heatmap` field. Refresh the browser to see it render.
+
+### `fo.Detections` / `fo.Segmentation` field
+
+`FO_SaveDetections` writes per-instance boxes (with optional labels, scores, and per-instance masks cropped to bbox) onto the current sample. Pixel-space xyxy is auto-converted to FiftyOne's normalized rxywh.
+
+`FO_SaveSegmentation` writes a single semantic mask as `fo.Segmentation`. Stored on disk via `mask_path`. Multi-instance masks are argmaxed to an indexed map.
+
+### String field / `fo.Classification` — `FO_SaveText`
+
+Writes the text to a string field on the current sample (default), or wraps it as `fo.Classification(label=text)` if you pick that destination from the right-click dialog.
+
+---
+
+## Right-click saves
+
+Two extra entry points appear when you right-click a node in the iframe:
+
+- **"Save Image to FiftyOne"** — appears on any node with an `IMAGE` output. Pops a dialog to pick destination (new sample / group slice), name, and `Copy labels`. One-shot save; the workflow itself is unchanged.
+- **"Save Text to FiftyOne"** — appears on any node with a `STRING` output. Same idea for text.
+- **"Save 3D to FiftyOne"** — appears on any node with a 3D output socket (`MESH`, `FILE_3D_*`) or that has previously emitted a 3D file. Auto-saves to a new sample.
+- **"Convert to Save Image to FiftyOne"** — appears on a native `SaveImage` node. Replaces it with `FO_SaveImage` at the same position with the IMAGE wire reconnected. Future runs auto-save through the FiftyOne pipeline.
 
 ---
 
 ## Copy labels (optional)
 
-Both the `FO_SaveImage` / `FO_SaveVideo` nodes and the right-click save dialog have a **Copy labels** picker — a pill multi-select listing every `fo.Label` field on the source sample with a non-`None` value. Click rows to add pills, click `×` on a pill to remove. Empty (default) = copy nothing.
+`FO_SaveImage`, `FO_SaveVideo`, `FO_Save3D`, and the right-click dialog all expose a **Copy labels** picker — a multi-select pill widget listing every `fo.Label` field on the source sample with a non-`None` value. The selected fields are deep-copied onto the new sample.
 
-When you save, those label fields are deep-copied onto the new sample (using `copy.deepcopy`, the same pattern as `fiftyone-image-edit-panel`). Helpful if you want generated outputs to inherit the source's annotations.
-
-The picker only shows fields that are *actually populated on the sample you're viewing* — empty fields are filtered out server-side.
-
----
-
-## Templates
-
-The plugin ships **19 starter templates** covering common workflows:
-
-- **Detection / Segmentation** (powered by the bundled packs):
-  - `Grounding (DINO) → Detections`
-  - `SAM3 (Text) → Segmentation`
-- **Image generation / editing**: image edit (Qwen), pose-/canny-/depth-to-image (Z-Image-Turbo), upscale, inpainting, outpainting.
-- **Image processing**: blur, sharpen, brightness, hue/saturation, film grain.
-- **Analysis**: depth (Lotus), captioning (Gemini), image-to-layers (Qwen).
-- **Video / 3D**: image-to-video (Wan), 3D (Hunyuan3D).
-
-Pick one from the **Load template…** dropdown in the toolbar; the workflow loads with the current sample's image already wired into the right input slots. Run as-is or modify before queueing.
-
-The same JSONs live under `comfyui_extension/workflows/`, which means they ALSO appear in ComfyUI's native **Workflow Templates** browser under the `fiftyone_bridge` group — handy if you want to load one directly inside the iframe.
-
-To save your own template: build the workflow you want, click **Save Template** in the toolbar, give it a name. Saved templates appear in the dropdown alongside the built-ins on the next panel load.
+The picker only shows fields that are actually populated on the current sample.
 
 ---
 
 ## Multi-input workflows (grouped datasets)
 
-If your sample is part of a grouped dataset, every image-typed slice gets its own file in ComfyUI's input directory:
+If your sample is in a grouped dataset, every image-typed slice gets its own file in ComfyUI's input directory:
 
-- `fo_current_sample.png` — follows the active modal slice (updates when you click slice tabs).
-- `fo_current_sample_<slice_name>.png` — one per group slice (e.g. `fo_current_sample_close_up.png`).
+- `fo_current_sample.png` — follows the **active modal slice** (updates when you click slice tabs).
+- `fo_current_sample_<slice_name>.png` — one per slice (e.g. `fo_current_sample_close_up.png`). Static — these don't move with pagination.
 
-Drop multiple `LoadImage` nodes and pick a different per-slice file in each one's dropdown. You can also use the `FO_LoadImage` node (under `FiftyOne/IO`) — it's a thin wrapper around the built-in `LoadImage` that's just there for discoverability.
+Drop multiple `LoadImage` nodes and pick a different per-slice file in each.
 
-When you switch the active slice tab in the modal, `fo_current_sample.png` updates and any `LoadImage` referencing it refreshes its preview automatically.
+When you switch the active slice tab in the modal, `fo_current_sample.png` updates and any `LoadImage` referencing it refreshes automatically.
 
 ---
 
-## Slice handling at save time
+## Templates
 
-Saves always target the slice you're **currently viewing** in the modal — not the original-slice sample. If you're on the `qwen_edit` slice and run a depth workflow, the heatmap lands on `qwen_edit`'s sample, not the original.
+The plugin ships **19 starter templates** covering image editing, generation, processing, analysis, video, 3D, detection, and segmentation. Pick from the **Load template…** dropdown in the toolbar.
 
-This is true for all save modes (image/video to slice, image/video to new sample, text, depth). The active slice is read from FiftyOne's Recoil `modalGroupSlice` atom and passed explicitly to the save operator, so it stays correct even when you paginate through slices quickly.
+Save your own: build a workflow, click **Save Template**, give it a name. Saved templates appear in the dropdown alongside the built-ins.
+
+Templates are JSON files in `comfyui_extension/workflows/`. They also surface in ComfyUI's native **Workflow Templates** browser under the `fiftyone_bridge` group.
+
+---
+
+## Adding your own FiftyOne I/O nodes
+
+Want a `FO_SaveKeypoints` node that ships keypoints as `fo.Keypoints`? Or a `FO_SaveEmbedding` that lands a float vector on a sample? Here's the recipe.
+
+For a **simple save node** (one output type, one destination — like `FO_SaveImage`), you touch three files:
+
+### 1. Define the node — [`comfyui_extension/nodes.py`](comfyui-plugin/comfyui_extension/nodes.py)
+
+Add a class following the `FO_SaveImage` pattern:
+
+```python
+class FO_SaveYourThing:
+    """Save your-thing to FiftyOne as <whatever>."""
+
+    CATEGORY = "FiftyOne/IO"
+    FUNCTION = "execute"
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    DESCRIPTION = "Short description shown in ComfyUI's node browser."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"data": ("YOUR_TYPE",)},
+            "optional": {
+                "name": ("STRING", {"default": "your_thing"}),
+                # ... whatever widgets you need
+            },
+        }
+
+    def execute(self, data, name="your_thing", **_):
+        # Do whatever serialization you need (write a file, etc.).
+        # Then dispatch to the FiftyOne side via PromptServer:
+        PromptServer.instance.send_sync("fiftyone.save_output", {
+            "type": "your_thing",          # this becomes output_type on the operator
+            "save_mode": "field",          # or "new_sample" / "group_slice" / etc.
+            "name": name,
+            # ... any extra payload keys you need
+        })
+        return {}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")  # always re-runs
+```
+
+### 2. Register the node — [`comfyui_extension/__init__.py`](comfyui-plugin/comfyui_extension/__init__.py)
+
+Add it to both mappings:
+
+```python
+from .nodes import FO_SaveYourThing  # add the import
+
+NODE_CLASS_MAPPINGS = {
+    # ... existing entries
+    "FO_SaveYourThing": FO_SaveYourThing,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    # ... existing entries
+    "FO_SaveYourThing": "Save Your Thing to FiftyOne",
+}
+```
+
+### 3. Handle the output type on the FiftyOne side — [`__init__.py`](comfyui-plugin/__init__.py)
+
+In `SaveComfyOutput.execute()`, route your `output_type` to a save helper. Look for the `if output_type in (...)` block (around line 1589) and add a branch:
+
+```python
+elif output_type == "your_thing":
+    self._save_your_thing(dataset, sample_id, field_name, ctx.params)
+```
+
+Then implement `_save_your_thing()` as a method on `SaveComfyOutput`. The simplest pattern is to follow `_save_text` (lines ~2034) for a single-field save, or `_save_segmentation` (lines ~1952) if your save involves a media file plus mask metadata.
+
+### When you also need React panel awareness
+
+If your save type needs special UI behavior on the React side (a custom banner, a dialog destination, anything beyond the default auto-save), you also touch:
+
+- **[`src/types.ts`](comfyui-plugin/src/types.ts)** — add `"your_thing"` to the `ComfyOutputType` union. If your dialog should show your save destinations to the user, add an entry to `SAVE_OPTIONS`. If your bridge dispatches extra payload fields, declare them on `OutputExtras`.
+- **[`src/ComfyUIPanel.tsx`](comfyui-plugin/src/ComfyUIPanel.tsx)** — `executeSave` already forwards everything the operator needs; you'd only edit this if you want a post-save banner (search for `setShowDepthSavedBanner` for the pattern) or some new UX behavior.
+- **[`comfyui_extension/js/fiftyone_bridge.js`](comfyui-plugin/comfyui_extension/js/fiftyone_bridge.js)** — if your node needs custom inline widgets or extra payload extraction in the `OUTPUT_READY` synthesis (see the `extras` block ~line 261), add it here.
+
+For most additions only steps 1–3 are necessary.
+
+### After your changes
+
+```bash
+cd comfyui-plugin
+python -m py_compile __init__.py comfyui_extension/__init__.py comfyui_extension/nodes.py
+npm run build  # rebuild the React panel if you touched src/
+```
+
+Then restart FiftyOne and reopen the sample modal. Your new node appears under **FiftyOne/IO** in ComfyUI's node browser.
 
 ---
 
 ## Configuration
 
-Click the **Settings** button in the panel toolbar to configure:
+Click **Settings** in the panel toolbar:
 
-- **ComfyUI Path** — absolute path to your ComfyUI install (where `main.py` lives). Defaults to `~/comfy/ComfyUI`.
-- **Port** — port to run ComfyUI on. Defaults to `8188`.
+- **ComfyUI Path** — absolute path to your ComfyUI install (where `main.py` lives). Default: `~/comfy/ComfyUI`. Tilde-expanded automatically.
+- **Port** — port to run ComfyUI on. Default: `8188`.
 
-Settings are persisted in FiftyOne's execution store (`~/.fiftyone/comfyui_plugin/`). After changing them, click **Save & Restart** to apply.
+Settings persist in FiftyOne's execution store. After changing them, click **Save & Restart**.
 
-The plugin's PID file lives at `~/.fiftyone/comfyui_plugin/.comfyui.pid`. If ComfyUI is already running externally on the configured port, the plugin will detect it and reuse it instead of spawning a duplicate.
+If ComfyUI is already running externally on the configured port, the plugin detects it via PID file (`~/.fiftyone/comfyui_plugin/.comfyui.pid`) and reuses it instead of spawning a duplicate.
 
 ---
 
-## Bundled third-party software
+## Bundled extras
 
-The plugin vendors trimmed copies of two custom-node packs under `comfyui-plugin/vendor/`. They're symlinked into ComfyUI's `custom_nodes/` at panel startup so users don't have to install them separately.
+The plugin vendors trimmed copies of two custom-node packs under `vendor/`. They're auto-symlinked into ComfyUI's `custom_nodes/` directory at panel startup:
 
-### `ComfyUI-Grounding`
+- **`ComfyUI-Grounding`** — GroundingDINO, MM-GroundingDINO, OWLv2, Florence-2, YOLO-World, plus SAM2 segmentation. ([upstream](https://github.com/harpreetsahota204/ComfyUI-Grounding))
+- **`ComfyUI-SAM3`** — SAM3 segmentation: text, click, and box-based, plus four interactive collector nodes that let you click directly on a node-rendered canvas. ([upstream](https://github.com/harpreetsahota204/ComfyUI-SAM3))
 
-- **Purpose**: Object detection + SAM2 segmentation. Includes GroundingDINO, MM-GroundingDINO, OWLv2, Florence-2, YOLO-World, SA2VA, plus SAM2 segmentation and a bounding-box visualizer.
-- **Upstream**: <https://github.com/harpreetsahota204/ComfyUI-Grounding>
-- **License**: see `vendor/ComfyUI-Grounding/LICENSE`.
-- **What was kept**: `nodes/` (entire), `grounding_init.py`, `__init__.py`, `web/`, `workflows/`, `requirements.txt`, `pyproject.toml`, `README.md`, `LICENSE`.
-- **What was dropped**: `docs/`, `assets/`, `tests/`, `pytest.ini`, `requirements-dev.txt`, `install.py`, `prestartup_script.py`, `.github/`. The dropped scripts only existed for ComfyUI Manager-style auto-install of weights/wheels — we replace that responsibility with the plugin's own `requirements.txt`.
-
-### `ComfyUI-SAM3`
-
-- **Purpose**: SAM3 segmentation — text-prompted, click-based, and box-based, plus four interactive collector nodes (point / bbox / multi-region / interactive segmentation) that let you click directly on a node-rendered canvas.
-- **Upstream**: <https://github.com/harpreetsahota204/ComfyUI-SAM3>
-- **License**: see `vendor/ComfyUI-SAM3/LICENSE`.
-- **What was kept**: `nodes/` (image-only — `load_model.py`, `segmentation.py`, `sam3_interactive.py`, `sam3_model_patcher.py`, `_model_cache.py`, `image_utils.py`, `utils.py`, `sam3/`), `prestartup_script.py` (slimmed to invoke `comfy_env.setup_env()`), `web/`, `workflows/` (image-only), `requirements.txt`, `pyproject.toml`, `README.md`, `LICENSE`.
-- **What was dropped**: `docs/`, `assets/`, `install.py`, `comfy-test.toml`, `comfy-env-root.toml`, `nodes/sam3_video_nodes.py`, `nodes/video_state.py`, `nodes/inference_reconstructor.py`, `workflows/video_point_prompt.json`, `.github/`. Video tracking is deferred — we may revisit later. The interactive collectors require `comfy-env`, which is a hard pip dep declared in our top-level `requirements.txt`.
-
-If you'd rather use your own build of either pack (e.g. a fork or a newer upstream), drop a real directory at `ComfyUI/custom_nodes/ComfyUI-Grounding` or `ComfyUI/custom_nodes/ComfyUI-SAM3`. The plugin detects the conflict and skips its symlink, keeping yours active.
+If you'd rather use your own build of either pack, drop a real (non-symlink) directory at `ComfyUI/custom_nodes/ComfyUI-Grounding` or `ComfyUI/custom_nodes/ComfyUI-SAM3`. The plugin detects the conflict and skips its symlink, keeping yours.
 
 ---
 
 ## Saving generation metadata
 
-Every save automatically captures and stores the workflow's generation parameters as fields on the new sample:
+Every save automatically captures the workflow's parameters as fields on the new sample (`comfy_workflow_name`, `comfy_prompt`, `comfy_negative_prompt`, `comfy_seed`, `comfy_steps`, `comfy_cfg`, `comfy_sampler`, `comfy_scheduler`, `comfy_denoise`, `comfy_model`, `comfy_node_title`, `comfy_prompt_id`, `comfy_workflow_json`).
 
-- `comfy_workflow_name` — the template/workflow name.
-- `comfy_prompt` / `comfy_negative_prompt` — extracted heuristically from any node with a string input named `text`/`prompt`/`positive`/etc., classified by the node class type.
-- `comfy_seed` / `comfy_steps` / `comfy_cfg` / `comfy_sampler` / `comfy_scheduler` / `comfy_denoise` — extracted from any KSampler-style node.
-- `comfy_model` — the checkpoint or unet name.
-- `comfy_node_title` / `comfy_prompt_id` — for traceability.
-- `comfy_workflow_json` — the full API workflow JSON, stringified.
-
-The extraction is heuristic, not workflow-specific — it works with arbitrary workflows (Qwen, Flux, SDXL, custom, etc.) by scanning for known input-key patterns. Some fields may be empty for exotic workflows; that's fine.
+The extraction is heuristic — it works with arbitrary workflows by scanning for known input-key patterns. Some fields may be empty for exotic workflows; that's fine.
 
 ---
 
 ## Troubleshooting
 
 **The panel shows "Starting ComfyUI…" forever.**
-First-time spawn can take 30+ seconds while ComfyUI loads its frontend. If it stalls longer, check the FiftyOne terminal — ComfyUI's stdout is piped there. Common causes: missing dependencies, a custom node failing to import, port already in use.
+First-time spawn can take 30+ seconds while ComfyUI loads. If it stalls longer, check the FiftyOne terminal (ComfyUI's stdout is piped there). Common causes: missing dependencies, a custom node failing to import, port already in use.
 
-**The depth heatmap doesn't appear after saving.**
-Refresh the browser. FiftyOne's heatmap renderer caches aggressively and won't pick up the new field on the same page load. The plugin shows a yellow banner reminding you of this after each depth save.
+**The depth heatmap / mask doesn't appear after saving.**
+Refresh the browser. FiftyOne's heatmap and mask renderers cache aggressively and won't pick up the new field on the same page load. The plugin shows a yellow banner reminding you of this after each such save.
 
 **The new group slice doesn't appear in the slice tabs after saving.**
-Same fix: refresh the browser, close the sample modal, then reopen it. Banner appears the first time this happens, with the same instructions. After the dataset is grouped you don't need to refresh again — only the flat→grouped transition is sticky.
+Same fix: refresh the browser, close the modal, reopen it. Only the first flat→grouped transition needs this.
 
-**`xt is not a function` / `sample not attached` errors in the console.**
-These come from FiftyOne's bundled worker code, not from this plugin. They fire on sample modal open and don't break the save flow. Ignore unless you're chasing them in FiftyOne itself.
+**`xt is not a function` / `sample not attached` in the console.**
+Pre-existing FiftyOne worker errors. Don't break the save flow; ignore.
 
-**`Cannot perform Construct on a detached ArrayBuffer` at `HeatmapOverlay`.**
-Same — FiftyOne's heatmap renderer worker. Doesn't affect saves; the heatmap is on the sample, just not currently rendering. Refresh the browser.
-
-**ComfyUI deprecation warnings (`scripts/ui.js`, `groupNode.js`, etc.).**
-Coming from ComfyUI-Manager and other custom nodes — not from this plugin. We import only `scripts/app.js` and `scripts/api.js`, both still supported.
+**ComfyUI deprecation warnings (`scripts/ui.js`, etc.).**
+From ComfyUI Manager and other custom nodes, not from this plugin.
 
 ---
 
-## Plugin layout
+## Debug logs
 
-```
-comfyui-plugin/
-├── fiftyone.yml                    # Plugin manifest
-├── package.json                    # JS build config
-├── __init__.py                     # Python: panel + operators (~1700 lines)
-├── comfyui_extension/              # ComfyUI bridge custom-node pack
-│   ├── __init__.py                 # Node registration
-│   ├── nodes.py                    # FO_Save{Image,Video,Text,Depth,Detections,Segmentation}, FO_LoadImage
-│   ├── js/
-│   │   └── fiftyone_bridge.js      # Iframe-side bridge: postMessage protocol, custom widgets, right-click menu
-│   └── workflows/                  # Starter workflow JSON files + _manifest.json (also visible in ComfyUI's Workflow Templates tab)
-├── vendor/                         # Bundled third-party custom-node packs (vendored)
-│   ├── ComfyUI-Grounding/          # Object detection + SAM2 segmentation
-│   └── ComfyUI-SAM3/               # SAM3 segmentation (text/click/box, incl. interactive collectors). Video files dropped.
-├── src/                            # React panel (TypeScript)
-│   ├── ComfyUIPanel.tsx            # Main panel component
-│   ├── SaveDialog.tsx              # Right-click save dialog
-│   ├── dialogHost.tsx              # Separate React root for the save dialog
-│   ├── hooks/usePluginClient.ts    # Panel-method client
-│   └── …
-└── dist/                           # Built bundle (generated by `npm run build`)
-```
+The plugin emits debug logs in three places:
 
-At panel startup the plugin symlinks all three of `comfyui_extension/`, `vendor/ComfyUI-Grounding/`, and `vendor/ComfyUI-SAM3/` into ComfyUI's `custom_nodes/` directory. If you already have a real (non-symlink) directory with the same name in `custom_nodes/`, your copy wins and the plugin logs a warning.
+- **Browser console** — `[fo-panel]`, `[fo-bridge]`, `[fo-host]`.
+- **FiftyOne terminal** — `[comfyui-plugin]`, `[FO_*]` from the operator save flow.
+- **ComfyUI terminal** — node `execute()` prints, vendored pack startup banners.
 
----
-
-## Development
-
-After a code change:
-
-- **Python changes** (anything in `__init__.py`, `comfyui_extension/`): just reload FiftyOne and reopen the sample. The Python code reloads on each panel-method call.
-- **JS / React changes**: run `npm run build` (or `npm run dev` for watch mode), then refresh the browser to pick up the new bundle.
-- **ComfyUI bridge JS changes** (`comfyui_extension/js/fiftyone_bridge.js`): refresh the FiftyOne page (the iframe reloads, picking up the new bridge). No build step needed for the bridge.
-
-The plugin emits verbose debug logs in two places:
-
-- **Browser console** — anything prefixed `[fo-panel]`, `[fo-bridge]`, or `[fo-host]`.
-- **FiftyOne terminal** — anything prefixed `[comfyui-plugin]`.
-
-When debugging save flows, check both — the React side and the Python operator each log distinct phases.
+When debugging save flows, you usually want all three open.
 
 ---
 
