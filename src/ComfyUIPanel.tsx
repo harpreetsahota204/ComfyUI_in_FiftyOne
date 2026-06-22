@@ -307,6 +307,7 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
     stop_server: schema?.view?.stop_server ?? "",
     load_template: schema?.view?.load_template ?? "",
     save_template: schema?.view?.save_template ?? "",
+    get_templates: schema?.view?.get_templates ?? "",
     update_config: schema?.view?.update_config ?? "",
     get_group_slices: schema?.view?.get_group_slices ?? "",
     inject_slice: schema?.view?.inject_slice ?? "",
@@ -398,9 +399,6 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
 
   const client = usePluginClient(uris);
   const saveExecutor = useOperatorExecutor(`${PLUGIN_NAME}/save_comfy_output`);
-  const templatesExecutor = useOperatorExecutor(
-    `${PLUGIN_NAME}/get_comfy_templates`
-  );
 
   // ── Fetch group slices from Python and forward to iframe ─────────────
 
@@ -510,11 +508,10 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
 
   useEffect(() => {
     if (!currentFilepath) return;
-    _DBG("templates effect: calling get_comfy_templates with filepath=", currentFilepath);
-    templatesExecutor
-      .execute({ filepath: currentFilepath })
-      .then((res: any) => {
-        const result = res?.result || res;
+    _DBG("templates effect: calling get_templates with filepath=", currentFilepath);
+    client
+      .getTemplates(currentFilepath)
+      .then((result) => {
         const tpls = result?.templates || [];
         _DBG("templates effect: got", tpls.length, "templates, default=", result?.default, "ids=", tpls.map((t: any) => t.id));
         setTemplates(tpls);
@@ -825,6 +822,15 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
         "position:fixed;border:none;z-index:9999;pointer-events:auto;";
       iframe.tabIndex = 0;
       iframe.allow = "clipboard-read; clipboard-write";
+      // The FiftyOne App document is served with
+      // `Cross-Origin-Embedder-Policy: credentialless` (cross-origin
+      // isolation).  Under COEP, a cross-origin iframe whose document does
+      // not itself assert COEP/CORP is blocked from rendering — which makes
+      // ComfyUI show the browser's "refused to connect" frame.  Marking the
+      // iframe `credentialless` loads it in an ephemeral, cookie-less context
+      // that satisfies the parent's COEP without requiring any ComfyUI-side
+      // headers.  (Chromium 110+, Firefox 119+; harmlessly ignored elsewhere.)
+      iframe.setAttribute("credentialless", "");
       iframe.src = iframeUrl;
       document.body.appendChild(iframe);
       _module.persistedIframe = iframe;
@@ -1089,13 +1095,12 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
       if (result.error) {
         console.error("[comfyui-plugin] save template error:", result.error);
       } else if (currentFilepath) {
-        templatesExecutor.execute({ filepath: currentFilepath }).then((res: any) => {
-          const r = res?.result || res;
+        client.getTemplates(currentFilepath).then((r) => {
           setTemplates(r?.templates || []);
         });
       }
     });
-  }, [templateNameInput, templateNameDialog, client, currentFilepath, templatesExecutor]);
+  }, [templateNameInput, templateNameDialog, client, currentFilepath]);
 
   // ── Render ───────────────────────────────────────────────────────────
 

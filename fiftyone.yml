@@ -10,4 +10,3 @@ panels:
   - comfyui_panel
 operators:
   - save_comfy_output
-  - get_comfy_templates

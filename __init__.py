@@ -24,9 +24,12 @@ Architecture
     ``/history`` endpoint and stores generation parameters on the
     saved sample.
 
-``GetComfyTemplates`` (foo.Operator)
-    Unlisted operator returning workflow templates filtered by sample
-    media type.
+Workflow templates are served by the ``get_templates`` panel method on
+``ComfyUIPanel`` (not a separate operator).
+
+Helpers are split into focused ``_*`` submodules (see ARCHITECTURE.md §3):
+``_constants``, ``_server``, ``_install``, ``_inject``, ``_templates``,
+``_dataset``, ``_labels``, ``_comfy_io``.
 """
 
 import base64
@@ -37,979 +40,69 @@ import os
 import re
 import signal
 import subprocess
-import sys
 import time
 import traceback
 
 import numpy as np
-import requests
 
-import bson
 import fiftyone as fo
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
-from fiftyone import ViewField as F
-from fiftyone.core.odm.database import get_db_conn
 
 # ---------------------------------------------------------------------------
-# Constants
+# Plugin internals (split into focused submodules; see ARCHITECTURE.md §3).
+# Constants and the cross-reimport process handle live in ._constants.
 # ---------------------------------------------------------------------------
 
-PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-EXTENSION_DIR = os.path.join(PLUGIN_DIR, "comfyui_extension")
-# Templates ship inside the bridge custom-node so a single symlink
-# (custom_nodes/fiftyone_bridge -> EXTENSION_DIR) is enough to make them
-# discoverable.  ComfyUI's native "Workflow Templates" tab scans
-# example_workflows/ (and a couple of legacy aliases) by convention; we
-# read these only from the FiftyOne panel's own dropdown via the
-# get_comfy_templates operator + _load_manifest() pair.
-TEMPLATES_DIR = os.path.join(EXTENSION_DIR, "workflows")
-VENDOR_DIR = os.path.join(PLUGIN_DIR, "vendor")
-
-# Bundled third-party custom-node packs that get symlinked into ComfyUI's
-# custom_nodes/ at panel startup. Each tuple is (vendor_subdir, dst_name)
-# where dst_name is the directory created under custom_nodes/.
-_VENDOR_PACKS = (
-    ("ComfyUI-Grounding", "ComfyUI-Grounding"),
-    ("ComfyUI-SAM3", "ComfyUI-SAM3"),
+from ._constants import (
+    DEFAULT_COMFYUI_PATH,
+    DEFAULT_COMFYUI_PORT,
+    TEMPLATES_DIR,
+    _persist,
 )
-
-STATE_DIR = os.path.join(os.path.expanduser("~"), ".fiftyone", "comfyui_plugin")
-PID_FILE = os.path.join(STATE_DIR, ".comfyui.pid")
-
-GROUP_FIELD = "group"
-ORIGINAL_SLICE = "original"
-
-DEFAULT_COMFYUI_PATH = os.path.expanduser("~/comfy/ComfyUI")
-DEFAULT_COMFYUI_PORT = 8188
-
-# ---------------------------------------------------------------------------
-# Process persistence — survives module reimports
-# ---------------------------------------------------------------------------
-
-_PERSIST_KEY = "comfyui_plugin__persist"
-if _PERSIST_KEY not in sys.modules:
-    import types as _types
-
-    _persist = _types.ModuleType(_PERSIST_KEY)
-    _persist.comfyui_process = None
-    sys.modules[_PERSIST_KEY] = _persist
-else:
-    _persist = sys.modules[_PERSIST_KEY]
-
-
-# ---------------------------------------------------------------------------
-# Server lifecycle helpers
-# ---------------------------------------------------------------------------
-
-
-def _get_config(ctx) -> dict:
-    """Read plugin configuration from the execution store.
-
-    ``comfyui_path`` is run through ``os.path.expanduser`` so that
-    user-supplied values like ``~/comfy/ComfyUI`` resolve.  Idempotent
-    on absolute paths.
-    """
-    store = ctx.store("comfyui_plugin_config")
-    return {
-        "comfyui_path": os.path.expanduser(
-            store.get("comfyui_path") or DEFAULT_COMFYUI_PATH
-        ),
-        "comfyui_port": int(store.get("comfyui_port") or DEFAULT_COMFYUI_PORT),
-        "comfyui_args": store.get("comfyui_args") or [],
-    }
-
-
-def _set_config(ctx, key: str, value):
-    """Write a single config value to the execution store."""
-    store = ctx.store("comfyui_plugin_config")
-    store.set(key, value)
-
-
-def _is_server_running(port: int, timeout: float = 2.0) -> bool:
-    """Check if a ComfyUI server is responding on the given port."""
-    try:
-        resp = requests.get(
-            f"http://127.0.0.1:{port}/system_stats",
-            timeout=timeout,
-        )
-        return resp.status_code == 200
-    except (requests.ConnectionError, requests.Timeout):
-        return False
-
-
-def _read_pid() -> "int | None":
-    """Read the PID from the PID file, or None if absent/stale."""
-    try:
-        with open(PID_FILE, "r") as f:
-            pid = int(f.read().strip())
-        os.kill(pid, 0)
-        return pid
-    except (FileNotFoundError, ValueError, OSError):
-        return None
-
-
-def _write_pid(pid: int):
-    """Write a PID to the PID file."""
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(PID_FILE, "w") as f:
-        f.write(str(pid))
-
-
-def _clear_pid():
-    """Remove the PID file."""
-    try:
-        os.remove(PID_FILE)
-    except FileNotFoundError:
-        pass
-
-
-def _spawn_comfyui(comfyui_path: str, port: int, extra_args: list) -> subprocess.Popen:
-    """Spawn a ComfyUI server subprocess."""
-    main_py = os.path.join(comfyui_path, "main.py")
-    if not os.path.isfile(main_py):
-        raise FileNotFoundError(
-            f"ComfyUI main.py not found at {main_py}. "
-            f"Check your comfyui_path setting."
-        )
-
-    cmd = [
-        sys.executable,
-        main_py,
-        "--listen", "127.0.0.1",
-        "--port", str(port),
-        "--enable-cors-header",
-        *extra_args,
-    ]
-
-    proc = subprocess.Popen(
-        cmd,
-        cwd=comfyui_path,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-
-    _persist.comfyui_process = proc
-    _write_pid(proc.pid)
-
-    return proc
-
-
-def _wait_for_server(port: int, timeout: float = 120.0) -> bool:
-    """Poll until the ComfyUI server is responsive (or timeout)."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if _is_server_running(port):
-            return True
-        time.sleep(1.0)
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Extension installation
-# ---------------------------------------------------------------------------
-
-
-def _symlink_pack(src: str, dst: str, label: str) -> bool:
-    """Create-or-refresh a symlink ``dst → src``.
-
-    Returns True if the symlink is in the desired state on exit (whether
-    we created it now or it was already correct), False if we had to
-    skip because ``dst`` exists as a real directory we don't own.
-
-    Behavior:
-    - If ``dst`` is missing: create the symlink.
-    - If ``dst`` is already a symlink to ``src``: no-op.
-    - If ``dst`` is a stale symlink: replace it.
-    - If ``dst`` is a real directory: log warning and skip (user-owned).
-    """
-    src_abs = os.path.abspath(src)
-
-    if os.path.lexists(dst):
-        if os.path.islink(dst):
-            current_target = os.path.realpath(dst)
-            if current_target == os.path.realpath(src_abs):
-                print(f"[comfyui-plugin] {label} symlink already current → {dst}")
-                return True
-            print(f"[comfyui-plugin] {label} symlink stale (→ {current_target}), replacing")
-            os.remove(dst)
-        else:
-            print(
-                f"[comfyui-plugin] WARNING: {dst} exists as a real directory "
-                f"(not symlink); leaving user copy in place. To use the "
-                f"bundled {label}, remove or rename that directory."
-            )
-            return False
-
-    os.symlink(src_abs, dst)
-    print(f"[comfyui-plugin] installed {label} symlink → {dst}  (target: {src_abs})")
-    return True
-
-
-def _install_extension(comfyui_path: str):
-    """Symlink the FiftyOne bridge + bundled custom-node packs into ComfyUI.
-
-    Three pieces are installed:
-
-    1. ``comfyui_extension/``   → ``custom_nodes/fiftyone_bridge``
-       (FiftyOne save nodes + JS bridge)
-    2. ``vendor/ComfyUI-Grounding/`` → ``custom_nodes/ComfyUI-Grounding``
-    3. ``vendor/ComfyUI-SAM3/``      → ``custom_nodes/ComfyUI-SAM3``
-
-    All three use ``_symlink_pack`` which is idempotent and refuses to
-    overwrite a real directory — if a user already has Grounding or SAM3
-    installed manually, theirs wins and we log a warning.
-    """
-    custom_nodes_dir = os.path.join(comfyui_path, "custom_nodes")
-    if not os.path.isdir(custom_nodes_dir):
-        print(f"[comfyui-plugin] custom_nodes dir not found: {custom_nodes_dir}")
-        return
-
-    print(f"[comfyui-plugin] installing custom-node symlinks under {custom_nodes_dir}")
-
-    bridge_dst = os.path.join(custom_nodes_dir, "fiftyone_bridge")
-    _symlink_pack(EXTENSION_DIR, bridge_dst, "fiftyone_bridge")
-
-    if not os.path.isdir(VENDOR_DIR):
-        print(f"[comfyui-plugin] vendor/ not found at {VENDOR_DIR}; skipping vendor packs")
-        return
-
-    for subdir, dst_name in _VENDOR_PACKS:
-        src = os.path.join(VENDOR_DIR, subdir)
-        if not os.path.isdir(src):
-            print(f"[comfyui-plugin] vendor pack missing: {src}; skipping")
-            continue
-        dst = os.path.join(custom_nodes_dir, dst_name)
-        _symlink_pack(src, dst, f"vendor/{subdir}")
-
-    print("[comfyui-plugin] custom-node install pass complete")
-
-
-# ---------------------------------------------------------------------------
-# Sample injection
-# ---------------------------------------------------------------------------
-
-
-CURRENT_SAMPLE_FILENAME = "fo_current_sample.png"
-_SLICE_FILE_PREFIX = "fo_current_sample_"
-
-
-def _slice_filename(slice_name: str) -> str:
-    """Return the filename used for a per-slice image in ComfyUI's input dir.
-
-    Example: ``"close up"`` → ``"fo_current_sample_close_up.png"``.
-    """
-    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", slice_name)
-    return f"{_SLICE_FILE_PREFIX}{sanitized}.png"
-
-
-def _inject_sample(
-    comfyui_path: str,
-    filepath: str,
-    target_filename: str = CURRENT_SAMPLE_FILENAME,
-) -> str:
-    """Copy a sample's image into ComfyUI's input directory as PNG.
-
-    Only injects image media types.  Videos and other non-image files are
-    skipped (returns ``""``), keeping the last valid image in place so
-    ComfyUI's LoadImage node isn't broken by a missing file.
-
-    The default ``target_filename`` is ``fo_current_sample.png`` (the
-    "active" file that follows the current sample / active modal slice).
-    Callers can pass a different name (e.g. ``fo_current_sample_<slice>.png``)
-    to write per-slice copies.
-    """
-    media_type = _get_media_type(filepath)
-    if media_type != "image":
-        print(f"[comfyui-plugin] _inject_sample: skipping non-image ({media_type}) {filepath}")
-        return ""
-
-    from PIL import Image
-
-    input_dir = os.path.join(comfyui_path, "input")
-    os.makedirs(input_dir, exist_ok=True)
-
-    dst = os.path.join(input_dir, target_filename)
-
-    # lexists() is True for files, dirs, valid symlinks, AND broken
-    # symlinks — exactly the union we need to safely overwrite.
-    if os.path.lexists(dst):
-        os.remove(dst)
-
-    with Image.open(filepath) as img:
-        img.save(dst, "PNG")
-    return target_filename
-
-
-def _inject_all_slices(
-    comfyui_path: str,
-    dataset: fo.Dataset,
-    sample_id: str,
-) -> list:
-    """Copy every group slice's image into ComfyUI's input dir.
-
-    Each slice's image is written as ``fo_current_sample_<slice>.png`` so
-    it appears in any LoadImage node's image dropdown.  Multi-input
-    workflows can then bind each LoadImage to the slice they want.
-
-    Stale ``fo_current_sample_*.png`` files left over from a previous
-    group (e.g. after the user navigates to a different sample) are
-    swept from the input dir.
-
-    Returns the list of filenames that exist after this call.  Returns
-    ``[]`` for flat (non-grouped) datasets — nothing to write.
-    """
-    try:
-        if not dataset.group_field:
-            return []
-        sample = dataset[sample_id]
-        group_elem = sample[dataset.group_field]
-        if not group_elem:
-            return []
-        group_id = group_elem.id
-    except Exception as exc:
-        print(f"[comfyui-plugin] _inject_all_slices: lookup error: {exc}")
-        return []
-
-    # One query for all slice samples in this group, vs. one-per-slice.
-    try:
-        group_samples = dataset.get_group(group_id)
-    except Exception as exc:
-        print(f"[comfyui-plugin] _inject_all_slices: get_group error: {exc}")
-        return []
-
-    input_dir = os.path.join(comfyui_path, "input")
-    os.makedirs(input_dir, exist_ok=True)
-
-    media_types = dataset.group_media_types or {}
-    desired = set()
-
-    for slice_name, slice_sample in group_samples.items():
-        if media_types.get(slice_name) != "image" or slice_sample is None:
-            continue
-        try:
-            target = _slice_filename(slice_name)
-            if _inject_sample(comfyui_path, slice_sample.filepath, target_filename=target):
-                desired.add(target)
-        except Exception as exc:
-            print(f"[comfyui-plugin] _inject_all_slices: slice '{slice_name}' error: {exc}")
-
-    # Sweep stale per-slice files (different group, deleted slice, etc.)
-    try:
-        for entry in os.listdir(input_dir):
-            if (
-                entry.startswith(_SLICE_FILE_PREFIX)
-                and entry.endswith(".png")
-                and entry not in desired
-            ):
-                os.remove(os.path.join(input_dir, entry))
-                print(f"[comfyui-plugin] _inject_all_slices: swept stale {entry}")
-    except OSError as exc:
-        print(f"[comfyui-plugin] _inject_all_slices: sweep error: {exc}")
-
-    return sorted(desired)
-
-
-# ---------------------------------------------------------------------------
-# Template helpers
-# ---------------------------------------------------------------------------
-
-
-def _load_manifest() -> dict:
-    """Load the template manifest."""
-    manifest_path = os.path.join(TEMPLATES_DIR, "_manifest.json")
-    with open(manifest_path) as f:
-        manifest = json.load(f)
-    return manifest
-
-
-def _get_media_type(filepath: str) -> str:
-    """Infer the media type from a file extension."""
-    ext = os.path.splitext(filepath)[1].lower()
-    if ext in (".mp4", ".avi", ".mov", ".mkv", ".webm"):
-        return "video"
-    if ext in (".obj", ".ply", ".glb", ".gltf", ".stl"):
-        return "point_cloud"
-    return "image"
-
-
-def _patch_load_image_nodes(workflow: dict, sample_filename: str) -> dict:
-    """Patch or inject a LoadImage node so the current sample is referenced.
-
-    Handles two template formats:
-    1. **Traditional** — top-level ``LoadImage`` nodes get their filename
-       replaced.
-    2. **Component/blueprint** — single component node with an ``IMAGE``
-       input slot.  A new ``LoadImage`` node is prepended and wired to
-       the component's input.
-    """
-    # --- Traditional format: patch existing LoadImage nodes ---------------
-    patched = False
-    for node in workflow.get("nodes", []):
-        if node.get("type") == "LoadImage":
-            wv = node.get("widgets_values")
-            if wv and len(wv) > 0:
-                wv[0] = sample_filename
-                patched = True
-
-    if patched:
-        return workflow
-
-    # --- Component format: add a LoadImage node and link it ---------------
-    nodes = workflow.get("nodes", [])
-    if not nodes:
-        return workflow
-
-    # Find the first component node that has an IMAGE input
-    target_node = None
-    target_slot = None
-    for node in nodes:
-        for idx, inp in enumerate(node.get("inputs", [])):
-            if inp.get("type") == "IMAGE" and inp.get("link") is None:
-                target_node = node
-                target_slot = idx
-                break
-        if target_node is not None:
-            break
-
-    if target_node is None:
-        return workflow
-
-    new_node_id = workflow.get("last_node_id", 100) + 1
-    new_link_id = workflow.get("last_link_id", 100) + 1
-
-    target_pos = target_node.get("pos", [400, 300])
-    if isinstance(target_pos, dict):
-        tx, ty = target_pos.get("0", 400), target_pos.get("1", 300)
-    else:
-        tx, ty = target_pos[0], target_pos[1]
-
-    load_image_node = {
-        "id": new_node_id,
-        "type": "LoadImage",
-        "pos": [tx - 400, ty],
-        "size": [315, 314],
-        "flags": {},
-        "order": 0,
-        "mode": 0,
-        "inputs": [],
-        "outputs": [
-            {"name": "IMAGE", "type": "IMAGE", "links": [new_link_id], "slot_index": 0},
-            {"name": "MASK", "type": "MASK", "links": [], "slot_index": 1},
-        ],
-        "properties": {"Node name for S&R": "LoadImage"},
-        "widgets_values": [sample_filename, "image"],
-    }
-
-    # link: [link_id, source_node, source_slot, target_node, target_slot, type]
-    new_link = [new_link_id, new_node_id, 0, target_node["id"], target_slot, "IMAGE"]
-
-    target_node["inputs"][target_slot]["link"] = new_link_id
-
-    nodes.append(load_image_node)
-    workflow.setdefault("links", []).append(new_link)
-    workflow["last_node_id"] = new_node_id
-    workflow["last_link_id"] = new_link_id
-
-    return workflow
-
-
-# ---------------------------------------------------------------------------
-# Dataset / group helpers
-# ---------------------------------------------------------------------------
-
-
-def _ensure_grouped(dataset: fo.Dataset, sample_id: str) -> str:
-    """Ensure the dataset is grouped and the sample belongs to a group.
-
-    Returns the sample's group id.  If the dataset was flat, this
-    performs the flat→grouped migration in place via a bulk MongoDB
-    write.  React detects the migration *after the fact* by diffing
-    ``dataset_is_grouped`` from ``get_group_slices`` calls before and
-    after a save (it doesn't rely on a flag returned from here),
-    because FiftyOne's ``useOperatorExecutor.execute`` is unreliable
-    about propagating operator return values across versions.
-    """
-    sample = dataset[sample_id]
-    gf = dataset.group_field
-
-    if not gf:
-        dataset.add_group_field(GROUP_FIELD, default=ORIGINAL_SLICE)
-        dataset.add_group_slice(ORIGINAL_SLICE, "image")
-        gf = dataset.group_field
-
-        # Raw MongoDB for bulk group assignment — the ORM would require
-        # loading, modifying, and saving every sample individually.
-        db = get_db_conn()
-        coll = db[dataset._sample_collection_name]
-
-        target_group_id = None
-        n = 0
-        for doc in coll.find({gf: {"$exists": False}}):
-            g = fo.Group()
-            coll.update_one(
-                {"_id": doc["_id"]},
-                {"$set": {gf: {
-                    "_id": bson.ObjectId(g.id),
-                    "_cls": "Group",
-                    "name": ORIGINAL_SLICE,
-                }}},
-            )
-            if str(doc["_id"]) == sample_id:
-                target_group_id = g.id
-            n += 1
-
-        dataset.reload()
-        print(f"[comfyui-plugin] converted {n} samples to grouped ('{ORIGINAL_SLICE}' slice)")
-
-        if target_group_id is None:
-            raise RuntimeError(f"Sample {sample_id} not found during group conversion")
-        return target_group_id
-
-    if sample[gf] is None:
-        group = fo.Group()
-        sample[gf] = group.element(ORIGINAL_SLICE)
-        sample.save()
-        return group.id
-
-    return sample[gf].id
-
-
-def _ensure_comfy_fields(dataset: fo.Dataset):
-    """Declare ComfyUI metadata fields if not already present."""
-    schema = dataset.get_field_schema()
-    fields = {
-        "comfy_workflow_name": fo.StringField,
-        "comfy_prompt": fo.StringField,
-        "comfy_negative_prompt": fo.StringField,
-        "comfy_seed": fo.IntField,
-        "comfy_steps": fo.IntField,
-        "comfy_cfg": fo.FloatField,
-        "comfy_sampler": fo.StringField,
-        "comfy_scheduler": fo.StringField,
-        "comfy_denoise": fo.FloatField,
-        "comfy_model": fo.StringField,
-        "comfy_node_title": fo.StringField,
-        "comfy_prompt_id": fo.StringField,
-    }
-    for name, ftype in fields.items():
-        if name not in schema:
-            dataset.add_sample_field(name, ftype)
-
-
-def _get_sample_label_fields(dataset: fo.Dataset, sample: fo.Sample) -> list:
-    """Return label field names with non-None values on *sample*.
-
-    Used to populate the "Copy labels" pickers on Save nodes and in the
-    save dialog.  Filtering on:
-
-    - ``EmbeddedDocumentField`` whose ``document_type`` is a
-      ``fo.Label`` subclass — excludes generic embedded docs, vector
-      embeddings, brain results, etc.
-    - non-None value on the source sample — empty fields would be
-      useless to copy.
-    """
-    out = []
-    for name, field in dataset.get_field_schema().items():
-        if not isinstance(field, fo.EmbeddedDocumentField):
-            continue
-        doc_type = getattr(field, "document_type", None)
-        if doc_type is None:
-            continue
-        try:
-            if not issubclass(doc_type, fo.Label):
-                continue
-        except TypeError:
-            continue
-        if sample.get_field(name) is not None:
-            out.append(name)
-    return out
-
-
-def _parse_copy_labels(copy_labels: str) -> list:
-    """Parse the ``copy_labels`` wire format into a list of field names.
-
-    Wire format (single string):
-    - ``""`` → ``[]`` (copy nothing)
-    - ``"a,b,c"`` → ``["a", "b", "c"]``
-    """
-    if not copy_labels:
-        return []
-    return [name.strip() for name in copy_labels.split(",") if name.strip()]
-
-
-# ---------------------------------------------------------------------------
-# Detection / segmentation helpers
-# ---------------------------------------------------------------------------
-
-
-def _parse_jsonish_list(raw):
-    """Parse polymorphic ``boxes`` / ``scores`` payloads to a Python list.
-
-    Accepts:
-    - ``""`` / ``None``                         → ``[]``
-    - JSON string (``"[[1,2,3,4],…]"``)         → parsed
-    - already-a-list                            → as-is
-    Anything else returns ``[]`` and logs.
-    """
-    if raw is None or raw == "":
-        return []
-    if isinstance(raw, list):
-        return raw
-    if isinstance(raw, str):
-        try:
-            decoded = json.loads(raw)
-            return decoded if isinstance(decoded, list) else []
-        except (ValueError, TypeError) as exc:
-            print(f"[comfyui-plugin] _parse_jsonish_list: parse failed: {exc}")
-            return []
-    print(f"[comfyui-plugin] _parse_jsonish_list: unexpected type {type(raw).__name__}")
-    return []
-
-
-def _resolve_detection_labels(pred_labels_json, fallback_labels: str, n_boxes: int) -> list:
-    """Resolve the per-detection class label list.
-
-    Priority (consistent with the plan's "pills are fallback" rule):
-    1. Upstream ``pred_labels_json`` if non-empty:
-       - list of strings → use directly (padded with last label if too short)
-       - period- / comma-separated single string → split
-    2. Fallback pill list ``fallback_labels`` (round-robin cycle).
-    3. Literal ``"object"`` for every detection.
-    """
-    upstream = _parse_jsonish_list(pred_labels_json)
-    if upstream and any(isinstance(x, str) and x.strip() for x in upstream):
-        if len(upstream) == 1 and isinstance(upstream[0], str):
-            tokens = [t.strip() for t in re.split(r"[.,]", upstream[0]) if t.strip()]
-            if len(tokens) > 1:
-                upstream = tokens
-        out = [str(upstream[i]) if i < len(upstream) else str(upstream[-1])
-               for i in range(n_boxes)]
-        print(f"[comfyui-plugin]   labels source=upstream, count={len(upstream)} → {out[:5]}…")
-        return out
-
-    pills = [p.strip() for p in (fallback_labels or "").split(",") if p.strip()]
-    if pills:
-        out = [pills[i % len(pills)] for i in range(n_boxes)]
-        print(f"[comfyui-plugin]   labels source=pills({pills}), cycled → {out[:5]}…")
-        return out
-
-    print("[comfyui-plugin]   labels source=default 'object'")
-    return ["object"] * n_boxes
-
-
-def _bboxes_from_masks(masks_arr) -> list:
-    """Compute tight pixel-space xyxy bboxes for each instance mask.
-
-    Used when the upstream pipeline only emits ``MASK`` (e.g. SAM2 /
-    SAM3 segmentation) and we need to construct ``fo.Detection`` objects
-    — every detection in FiftyOne carries a ``bounding_box``.
-
-    ``masks_arr`` is ``[N, H, W]`` uint8 (``0`` / ``255`` after our
-    round-trip through ``_save_mask_tensor_npy``).  Returns
-    ``[[x1, y1, x2, y2], ...]`` in pixel coordinates.  Empty / all-zero
-    masks become ``[0, 0, 0, 0]`` (skipped by the caller).
-
-    Logs per-mask non-zero pixel count so we can tell at a glance
-    whether the upstream model emitted real masks or just empties.
-    """
-    if masks_arr is None or masks_arr.ndim != 3:
-        print(f"[comfyui-plugin] _bboxes_from_masks: bad shape {None if masks_arr is None else masks_arr.shape}")
-        return []
-    out = []
-    for i in range(masks_arr.shape[0]):
-        ys, xs = np.where(masks_arr[i] > 127)
-        if xs.size == 0:
-            print(f"[comfyui-plugin]   mask[{i}] is all-zero → bbox=[0,0,0,0] (will be skipped)")
-            out.append([0.0, 0.0, 0.0, 0.0])
-            continue
-        bbox = [
-            float(xs.min()),
-            float(ys.min()),
-            float(xs.max() + 1),
-            float(ys.max() + 1),
-        ]
-        print(f"[comfyui-plugin]   mask[{i}]: {xs.size} non-zero px → bbox={bbox}")
-        out.append(bbox)
-    return out
-
-
-def _crop_mask_to_bbox(masks_arr, idx: int, x1, y1, x2, y2):
-    """Return the per-instance mask cropped to its bbox as ``np.uint8`` 2D.
-
-    ``masks_arr`` is the full per-instance stack ``[N, H, W]`` (uint8,
-    ``0/255`` after our round-trip).  Output is ``(h_box, w_box)`` with
-    values in ``{0, 255}``, suitable for ``fo.Detection.mask``.
-    Returns ``None`` if the index is out of range or the bbox is empty.
-    """
-    if masks_arr.ndim != 3 or idx >= masks_arr.shape[0]:
-        return None
-    H, W = masks_arr.shape[1], masks_arr.shape[2]
-    xa = max(0, int(round(x1)))
-    ya = max(0, int(round(y1)))
-    xb = min(W, int(round(x2)))
-    yb = min(H, int(round(y2)))
-    if xb <= xa or yb <= ya:
-        return None
-    return np.ascontiguousarray(masks_arr[idx, ya:yb, xa:xb])
-
-
-def _parse_mask_targets(raw: str) -> dict:
-    """Parse a mask-targets string into a ``{str: str}`` mapping.
-
-    Accepts JSON object (``'{"0":"bg","1":"fg"}'``) or
-    ``key=value,key=value`` form.  Empty/None/unparseable → ``{}``.
-
-    Keys are kept as strings — MongoDB requires string document keys
-    (writing a dict with int keys raises ``bson.errors.InvalidDocument``),
-    and FiftyOne accepts string-typed pixel indices for
-    ``fo.Segmentation.mask_targets`` (it converts back to int internally
-    when rendering).  Each key must still represent a valid integer
-    pixel value; non-integer keys are dropped.
-    """
-    if not raw:
-        return {}
-    s = raw.strip()
-    try:
-        obj = json.loads(s)
-        if isinstance(obj, dict):
-            out = {}
-            for k, v in obj.items():
-                k_str = str(k).strip()
-                # Validate that the key is integer-typed (pixel value)
-                # but keep it as a string in the returned dict.
-                try:
-                    int(k_str)
-                except ValueError:
-                    continue
-                out[k_str] = str(v)
-            return out
-    except (ValueError, TypeError):
-        pass
-    out = {}
-    for part in s.split(","):
-        if "=" in part:
-            k, v = part.split("=", 1)
-            k_str = k.strip()
-            try:
-                int(k_str)
-            except ValueError:
-                continue
-            out[k_str] = v.strip()
-    return out
-
-
-def _resolve_active_slice_sample(ctx, slice_override: str = "") -> tuple:
-    """Return ``(sample_id, filepath)`` for the slice the user is viewing.
-
-    FiftyOne's ``ctx.current_sample`` always points to the group's
-    default ("original") slice sample, regardless of which slice tab
-    the user has selected.  This helper looks up the actual visible
-    slice's sample.
-
-    Active-slice resolution order:
-
-    1. ``slice_override`` (if non-empty) — the most reliable source,
-       since the React panel can pass the slice name directly from
-       Recoil's ``modalGroupSlice`` atom.  Used by the save operator,
-       where ``ctx.group_slice`` is not consistently populated.
-    2. ``ctx.group_slice`` — works in lifecycle hooks and panel
-       methods, may be ``None`` in operator context.
-    3. None → keep ``ctx.current_sample`` (default-slice case or flat
-       dataset).
-
-    Returns ``("", "")`` if no sample is loaded at all.
-    """
-    if not ctx.current_sample:
-        return "", ""
-    dataset = ctx.dataset
-    try:
-        sample = dataset[ctx.current_sample]
-    except Exception as exc:
-        print(f"[comfyui-plugin] _resolve_active_slice_sample: lookup error: {exc}")
-        return "", ""
-
-    gf = dataset.group_field
-    sample_id = ctx.current_sample
-    filepath = sample.filepath
-
-    active_slice = slice_override or ctx.group_slice or ""
-
-    if gf and active_slice:
-        group_elem = sample[gf]
-        if group_elem and group_elem.name != active_slice:
-            try:
-                slice_sample = (
-                    dataset
-                    .select_group_slices(active_slice)
-                    .match(F(f"{gf}._id") == bson.ObjectId(group_elem.id))
-                    .first()
-                )
-                if slice_sample is not None:
-                    sample_id = slice_sample.id
-                    filepath = slice_sample.filepath
-            except Exception as exc:
-                print(f"[comfyui-plugin] _resolve_active_slice_sample: slice lookup error: {exc}")
-
-    return sample_id, filepath
-
-
-def _ensure_compatible_slice(dataset: fo.Dataset, media_type: str) -> str:
-    """Return a group-slice name compatible with ``media_type``.
-
-    Tries the dataset's default slice first, then any existing slice with
-    a matching media type, and finally creates a new slice named
-    ``ORIGINAL_SLICE`` (for image) or ``media_type`` (for video, etc.).
-
-    Used when saving as a "new sample" into a grouped dataset: every
-    sample must have a group field, and that group's slice must match
-    the new sample's media type.
-    """
-    media_types = dataset.group_media_types or {}
-
-    default = dataset.default_group_slice
-    if default and media_types.get(default) == media_type:
-        return default
-
-    for name, mt in media_types.items():
-        if mt == media_type:
-            return name
-
-    name = ORIGINAL_SLICE if media_type == "image" else media_type
-    if name not in dataset.group_slices:
-        dataset.add_group_slice(name, media_type)
-    return name
-
-
-# ---------------------------------------------------------------------------
-# ComfyUI metadata extraction
-# ---------------------------------------------------------------------------
-
-
-_PROMPT_INPUT_KEYS = {"text", "prompt", "string", "positive", "instruction"}
-_NEGATIVE_PROMPT_HINTS = {"negative", "neg", "uncond"}
-_MODEL_INPUT_KEYS = {
-    "unet_name", "ckpt_name", "model_name", "model_path",
-    "model_filename", "lora_name",
-}
-_SAMPLER_CLASS_HINTS = {"sampler", "ksampler"}
-_MODEL_CLASS_HINTS = {"loader", "checkpoint", "unet", "model"}
-
-# Metadata fields that must be coerced to str before assignment.  Some
-# ComfyUI nodes return list/tuple values (e.g. multi-LoRA loaders return a
-# list of model names), which would fail FiftyOne's StringField validation.
-_METADATA_STR_FIELDS = frozenset({
-    "comfy_workflow_name", "comfy_prompt", "comfy_negative_prompt",
-    "comfy_sampler", "comfy_scheduler", "comfy_model",
-})
-
-
-def _fetch_comfy_metadata(port: int, prompt_id: str) -> "dict | None":
-    """Fetch generation metadata from ComfyUI's /history endpoint.
-
-    Uses a generic scan: instead of hard-coding specific node class names,
-    we inspect every node's inputs and match by input-key heuristics so
-    that arbitrary workflows (Qwen, Flux, SDXL, custom, etc.) all get
-    captured.
-    """
-    print(f"[comfyui-plugin] _fetch_comfy_metadata: prompt_id={prompt_id!r}")
-    if not prompt_id:
-        print(f"[comfyui-plugin]   → returning None (no prompt_id)")
-        return None
-
-    try:
-        url = f"http://127.0.0.1:{port}/history/{prompt_id}"
-        print(f"[comfyui-plugin]   fetching {url}")
-        resp = requests.get(url, timeout=5)
-        resp.raise_for_status()
-        full_json = resp.json()
-        history = full_json.get(prompt_id, {})
-        print(f"[comfyui-plugin]   history keys: {list(history.keys()) if isinstance(history, dict) else type(history)}")
-    except Exception as e:
-        print(f"[comfyui-plugin]   could not fetch history: {e}")
-        return None
-
-    prompt_data = history.get("prompt", [])
-    api_workflow = None
-    if isinstance(prompt_data, (list, tuple)):
-        for item in prompt_data:
-            if isinstance(item, dict) and len(item) > 0:
-                api_workflow = item
-                break
-    if api_workflow is None:
-        api_workflow = {}
-    print(f"[comfyui-plugin]   api_workflow: {len(api_workflow)} nodes")
-
-    metadata = {
-        "workflow_json": api_workflow,
-        "prompt": "",
-        "negative_prompt": "",
-        "seed": None,
-        "steps": None,
-        "cfg": None,
-        "sampler": None,
-        "scheduler": None,
-        "denoise": None,
-        "model": "",
-    }
-
-    class_types_seen = []
-    for node_id, node_data in api_workflow.items():
-        if not isinstance(node_data, dict):
-            continue
-        class_type = node_data.get("class_type", "")
-        inputs = node_data.get("inputs", {})
-        class_types_seen.append(class_type)
-        ct_lower = class_type.lower()
-
-        for key, val in inputs.items():
-            if not isinstance(val, str) or not val.strip():
-                continue
-            key_lower = key.lower()
-            if key_lower in _PROMPT_INPUT_KEYS:
-                is_negative = any(h in ct_lower for h in _NEGATIVE_PROMPT_HINTS)
-                if is_negative and not metadata["negative_prompt"]:
-                    metadata["negative_prompt"] = val
-                    print(f"[comfyui-plugin]   neg prompt from {class_type} node {node_id} key={key}: {val[:80]!r}")
-                elif not is_negative and not metadata["prompt"]:
-                    metadata["prompt"] = val
-                    print(f"[comfyui-plugin]   prompt from {class_type} node {node_id} key={key}: {val[:80]!r}")
-
-            if key_lower in _MODEL_INPUT_KEYS and not metadata["model"]:
-                metadata["model"] = val
-                print(f"[comfyui-plugin]   model from {class_type} node {node_id} key={key}: {val!r}")
-
-        if any(h in ct_lower for h in _SAMPLER_CLASS_HINTS):
-            if metadata["seed"] is None and "seed" in inputs:
-                metadata["seed"] = inputs["seed"]
-            if metadata["steps"] is None and "steps" in inputs:
-                metadata["steps"] = inputs["steps"]
-            if metadata["cfg"] is None and "cfg" in inputs:
-                metadata["cfg"] = inputs["cfg"]
-            if metadata["sampler"] is None:
-                metadata["sampler"] = inputs.get("sampler_name") or inputs.get("sampler")
-            if metadata["scheduler"] is None and "scheduler" in inputs:
-                metadata["scheduler"] = inputs["scheduler"]
-            if metadata["denoise"] is None and "denoise" in inputs:
-                metadata["denoise"] = inputs["denoise"]
-            print(f"[comfyui-plugin]   sampler info from {class_type} node {node_id}: seed={metadata['seed']} steps={metadata['steps']} cfg={metadata['cfg']}")
-
-        if not metadata["model"] and any(h in ct_lower for h in _MODEL_CLASS_HINTS):
-            for key, val in inputs.items():
-                if isinstance(val, str) and ("." in val or "/" in val):
-                    metadata["model"] = val
-                    print(f"[comfyui-plugin]   model (heuristic) from {class_type} node {node_id} key={key}: {val!r}")
-                    break
-
-    print(f"[comfyui-plugin]   all class_types: {class_types_seen}")
-    _p = repr(metadata["prompt"][:60]) if metadata["prompt"] else "''"
-    print(f"[comfyui-plugin]   final: prompt={_p} seed={metadata['seed']} steps={metadata['steps']} model={metadata['model']!r}")
-    return metadata
-
-
-# ---------------------------------------------------------------------------
-# Panel
-# ---------------------------------------------------------------------------
+from ._server import (
+    _clear_pid,
+    _get_config,
+    _is_server_running,
+    _read_pid,
+    _set_config,
+    _spawn_comfyui,
+    _wait_for_server,
+)
+from ._install import (
+    _install_extension,
+)
+from ._inject import (
+    _inject_all_slices,
+    _inject_sample,
+)
+from ._templates import (
+    _get_media_type,
+    _load_manifest,
+    _patch_load_image_nodes,
+)
+from ._dataset import (
+    _ensure_comfy_fields,
+    _ensure_compatible_slice,
+    _ensure_grouped,
+    _get_sample_label_fields,
+    _resolve_active_slice_sample,
+    _sample_in_slice,
+)
+from ._labels import (
+    _bboxes_from_masks,
+    _crop_mask_to_bbox,
+    _parse_copy_labels,
+    _parse_jsonish_list,
+    _parse_mask_targets,
+    _resolve_detection_labels,
+)
+from ._comfy_io import (
+    _METADATA_STR_FIELDS,
+    _auto_increment_path,
+    _fetch_comfy_metadata,
+    _fetch_file_from_comfyui,
+)
 
 
 class ComfyUIPanel(foo.Panel):
@@ -1105,6 +198,7 @@ class ComfyUIPanel(foo.Panel):
             print(f"[comfyui-plugin] extension install error: {exc}")
 
         running = _is_server_running(port)
+        iframe_url = f"http://localhost:{port}" if running else ""
 
         sample_filename = ""
         if running and filepath and os.path.isdir(comfyui_path):
@@ -1126,7 +220,7 @@ class ComfyUIPanel(foo.Panel):
             "server_status": "ready" if running else "not_running",
             "server_port": port,
             "server_error": "",
-            "iframe_url": f"http://localhost:{port}" if running else "",
+            "iframe_url": iframe_url,
             "comfyui_path": comfyui_path,
             "sample_filename": sample_filename,
         }
@@ -1177,7 +271,7 @@ class ComfyUIPanel(foo.Panel):
             try:
                 _persist.comfyui_process.terminate()
                 _persist.comfyui_process.wait(timeout=10)
-            except Exception:
+            except (subprocess.TimeoutExpired, OSError):
                 _persist.comfyui_process.kill()
             _persist.comfyui_process = None
 
@@ -1249,7 +343,7 @@ class ComfyUIPanel(foo.Panel):
         manifest_path = os.path.join(TEMPLATES_DIR, "_manifest.json")
         try:
             manifest = _load_manifest()
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             manifest = {"templates": []}
 
         existing_ids = {t["id"] for t in manifest.get("templates", [])}
@@ -1268,6 +362,43 @@ class ComfyUIPanel(foo.Panel):
 
         print(f"[comfyui-plugin] saved template: {slug}")
         return {"status": "ok", "template_id": slug}
+
+    def get_templates(self, ctx):
+        """Return workflow templates compatible with the sample's media type.
+
+        Panel-method twin of the former ``get_comfy_templates`` operator —
+        folded in so template fetch uses the same transport as
+        ``load_template`` / ``save_template`` (one mechanism, not two).
+        """
+        filepath = ctx.params.get("filepath", "")
+        media_type = _get_media_type(filepath) if filepath else "image"
+        print(
+            f"[comfyui-plugin] get_templates: filepath={filepath!r}, "
+            f"media_type={media_type!r}"
+        )
+
+        try:
+            manifest = _load_manifest()
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[comfyui-plugin] get_templates: manifest error: {e}")
+            traceback.print_exc()
+            return {"templates": [], "default": None}
+
+        all_templates = manifest.get("templates", [])
+        compatible = [
+            t for t in all_templates
+            if media_type in t.get("input_types", [])
+        ]
+        compat_ids = [t["id"] for t in compatible]
+        print(
+            f"[comfyui-plugin] get_templates: returning {len(compatible)}/{len(all_templates)} "
+            f"compatible template(s) for media_type={media_type!r}: {compat_ids}"
+        )
+
+        return {
+            "templates": compatible,
+            "default": compatible[0]["id"] if compatible else None,
+        }
 
     def update_config(self, ctx):
         """Update plugin configuration."""
@@ -1390,11 +521,8 @@ class ComfyUIPanel(foo.Panel):
                 filepath = sample.filepath
                 sample_id = sample.id
             else:
-                slice_sample = (
-                    dataset
-                    .select_group_slices(slice_name)
-                    .match(F(f"{gf}._id") == bson.ObjectId(group_elem.id))
-                    .first()
+                slice_sample = _sample_in_slice(
+                    dataset, gf, group_elem.id, slice_name
                 )
                 if slice_sample is None:
                     return {"error": f"No sample in slice '{slice_name}' for this group", "sample_filename": ""}
@@ -1406,12 +534,9 @@ class ComfyUIPanel(foo.Panel):
             if not sample_filename:
                 return {"error": f"Cannot inject non-image file: {filepath}", "sample_filename": ""}
 
-            # Push the resolved sample_id / filepath into panel state so
-            # React's ``data.current_sample_id`` reflects the active
-            # slice — this matters because the save operator falls back
-            # to React's params if ctx-resolution returns empty (rare
-            # but possible).  Most importantly, this updates state even
-            # when ``on_change_group_slice`` doesn't fire.
+            # Push the resolved sample_id / filepath into panel state
+            # (see step 3 in the docstring for why this path mirrors the
+            # lifecycle hook).
             try:
                 ctx.panel.set_state("current_filepath", filepath)
                 ctx.panel.set_state("current_sample_id", sample_id)
@@ -1460,39 +585,13 @@ class ComfyUIPanel(foo.Panel):
                 stop_server=self.stop_server,
                 load_template=self.load_template,
                 save_template=self.save_template,
+                get_templates=self.get_templates,
                 update_config=self.update_config,
                 get_group_slices=self.get_group_slices,
                 inject_slice=self.inject_slice,
                 trigger_reload=self.trigger_reload,
             ),
         )
-
-
-# ---------------------------------------------------------------------------
-# Operators
-# ---------------------------------------------------------------------------
-
-
-def _auto_increment_path(base_path: str) -> str:
-    """Return *base_path* if it doesn't exist, else append _2, _3, etc."""
-    if not os.path.exists(base_path):
-        return base_path
-    stem, ext = os.path.splitext(base_path)
-    idx = 2
-    while os.path.exists(f"{stem}_{idx}{ext}"):
-        idx += 1
-    return f"{stem}_{idx}{ext}"
-
-
-def _fetch_file_from_comfyui(port: int, filename: str, subfolder: str = "") -> bytes:
-    """Download a file (image, video, etc.) from ComfyUI's /view endpoint."""
-    resp = requests.get(
-        f"http://127.0.0.1:{port}/view",
-        params={"filename": filename, "subfolder": subfolder, "type": "output"},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.content
 
 
 class SaveComfyOutput(foo.Operator):
@@ -1571,7 +670,7 @@ class SaveComfyOutput(foo.Operator):
             workflow_name = ctx.params.get("workflow_name", "")
             copy_labels = ctx.params.get("copy_labels", "")
 
-            print(f"[comfyui-plugin] === SAVE START ===")
+            print("[comfyui-plugin] === SAVE START ===")
             print(f"[comfyui-plugin]   prompt_id={prompt_id!r}  node_title={node_title!r}  workflow_name={workflow_name!r}")
             print(f"[comfyui-plugin]   output_type={output_type!r}  save_as={save_as!r}  field_name={field_name!r}")
             print(f"[comfyui-plugin]   comfyui_filename={comfyui_filename!r}  has_image_data={bool(image_data_b64)}")
@@ -1771,84 +870,34 @@ class SaveComfyOutput(foo.Operator):
                 print(f"[comfyui-plugin]   copied label '{name}' from {source_sample_id}")
 
     @staticmethod
-    def _save_detections(dataset, sample_id, port, field_name, params):
-        """Save detections produced by FO_SaveDetections as fo.Detections.
+    def _load_masks_npy(port, masks_filename):
+        """Fetch and load the per-instance mask ``.npy`` from ComfyUI's output.
 
-        Polymorphic — accepts both BBOX-style (list-of-list-of-floats) and
-        SAM3-style (JSON string of the same shape) box payloads.  Labels
-        and scores follow the same flexibility rules.
-
-        Sources of truth (in order of preference):
-
-        - **Image dimensions**: ``image_height``/``image_width`` from the
-          payload (set by the node when it has the ``image`` socket
-          connected); else read from ``sample.metadata`` server-side.
-        - **Boxes**: ``boxes_json`` if provided; else derived from each
-          mask's tight enclosure (``np.where``) if only masks are present.
-          Matches FiftyOne's ``fo.Detection`` convention — every
-          detection has a bbox; masks ride along cropped to that bbox.
-        - **Labels**: upstream ``pred_labels_json`` if provided; else
-          the user's pill widget (cycled round-robin); else ``"object"``.
-        - **Scores**: upstream ``scores_json`` if provided; else None.
-
-        Pixel-space xyxy boxes are converted to FiftyOne's normalized
-        rxywh.  Per-detection masks are reconstructed from the ``.npy``
-        file the node wrote into ComfyUI's output dir.
+        Returns the numpy array, or ``None`` if no filename was given or the
+        fetch/parse failed (detections then fall back to box-only).
         """
-        boxes_json = params.get("boxes_json", "")
-        pred_labels_json = params.get("pred_labels_json", "")
-        scores_json = params.get("scores_json", "")
-        masks_filename = params.get("masks_filename", "")
-        fallback_labels = params.get("fallback_labels", "")
-        image_height = int(params.get("image_height", 0) or 0)
-        image_width = int(params.get("image_width", 0) or 0)
-
-        print(
-            f"[comfyui-plugin] _save_detections: field={field_name!r}, "
-            f"image_payload=({image_height}x{image_width}), "
-            f"boxes_json_len={len(boxes_json or '')}, "
-            f"labels_json_len={len(pred_labels_json or '')}, "
-            f"scores_json_len={len(scores_json or '')}, "
-            f"masks_filename={masks_filename!r}, "
-            f"fallback_labels={fallback_labels!r}"
-        )
-
-        # Load masks first so we can derive bboxes from them if needed.
-        masks_arr = None
-        if masks_filename:
-            try:
-                npy_bytes = _fetch_file_from_comfyui(port, masks_filename, "")
-                masks_arr = np.load(_io.BytesIO(npy_bytes))
-                print(
-                    f"[comfyui-plugin]   loaded masks: shape={masks_arr.shape}, "
-                    f"dtype={masks_arr.dtype}"
-                )
-            except Exception as exc:
-                print(f"[comfyui-plugin]   mask load failed (continuing without masks): {exc}")
-                masks_arr = None
-
-        # The node-side already drops boxes that aren't ``[[x1,y1,x2,y2],
-        # ...]`` shaped (see FO_SaveDetections.execute), so by the time
-        # we get here ``boxes_json`` is either valid bbox JSON or empty.
-        boxes = _parse_jsonish_list(boxes_json)
-
-        # Boxes-from-masks fallback (instance-segmentation-style workflows
-        # where the user only connected MASK output, e.g. SAM2 / SAM3
-        # mask-only flows).
-        if not boxes and masks_arr is not None:
-            boxes = _bboxes_from_masks(masks_arr)
-            print(f"[comfyui-plugin]   derived {len(boxes)} bbox(es) from masks")
-
-        if not boxes:
+        if not masks_filename:
+            return None
+        try:
+            npy_bytes = _fetch_file_from_comfyui(port, masks_filename, "")
+            masks_arr = np.load(_io.BytesIO(npy_bytes))
             print(
-                "[comfyui-plugin]   nothing to save — no boxes from upstream "
-                "and no masks to derive them from"
+                f"[comfyui-plugin]   loaded masks: shape={masks_arr.shape}, "
+                f"dtype={masks_arr.dtype}"
             )
-            return
+            return masks_arr
+        except Exception as exc:
+            print(f"[comfyui-plugin]   mask load failed (continuing without masks): {exc}")
+            return None
 
-        # Image dims: payload first (post-processing-aware), then sample
-        # metadata.  Both being zero falls through to identity-norm
-        # which the user can correct by hooking up `image`.
+    @staticmethod
+    def _resolve_image_dims(dataset, sample_id, image_height, image_width, masks_arr):
+        """Resolve image dimensions: payload → sample metadata → mask shape.
+
+        Payload dims (set when the ``image`` socket is connected) win because
+        they reflect any post-processing.  Both staying zero falls through to
+        identity normalization in ``_build_detections``.
+        """
         if image_height <= 0 or image_width <= 0:
             try:
                 sample = dataset[sample_id]
@@ -1870,11 +919,16 @@ class SaveComfyOutput(foo.Operator):
                 f"→ {image_height}x{image_width}"
             )
 
-        labels = _resolve_detection_labels(
-            pred_labels_json, fallback_labels, len(boxes),
-        )
-        scores = _parse_jsonish_list(scores_json) or [None] * len(boxes)
+        return image_height, image_width
 
+    @staticmethod
+    def _build_detections(boxes, labels, scores, masks_arr, image_height, image_width):
+        """Assemble ``fo.Detection`` objects from boxes/labels/scores/masks.
+
+        Pixel-space xyxy boxes are converted to FiftyOne's normalized rxywh
+        (identity if dims are unknown).  Malformed and zero-area boxes are
+        skipped; per-instance masks (if present) are cropped to each bbox.
+        """
         detections = []
         skipped_degenerate = 0
         skipped_malformed = 0
@@ -1927,6 +981,86 @@ class SaveComfyOutput(foo.Operator):
                 f"{skipped_malformed} malformed box(es) "
                 f"out of {len(boxes)} input(s)"
             )
+        return detections
+
+    @staticmethod
+    def _save_detections(dataset, sample_id, port, field_name, params):
+        """Save detections produced by FO_SaveDetections as fo.Detections.
+
+        Polymorphic — accepts both BBOX-style (list-of-list-of-floats) and
+        SAM3-style (JSON string of the same shape) box payloads.  Labels
+        and scores follow the same flexibility rules.
+
+        Sources of truth (in order of preference):
+
+        - **Image dimensions**: ``image_height``/``image_width`` from the
+          payload (set by the node when it has the ``image`` socket
+          connected); else read from ``sample.metadata`` server-side.
+        - **Boxes**: ``boxes_json`` if provided; else derived from each
+          mask's tight enclosure (``np.where``) if only masks are present.
+          Matches FiftyOne's ``fo.Detection`` convention — every
+          detection has a bbox; masks ride along cropped to that bbox.
+        - **Labels**: upstream ``pred_labels_json`` if provided; else
+          the user's pill widget (cycled round-robin); else ``"object"``.
+        - **Scores**: upstream ``scores_json`` if provided; else None.
+
+        Pixel-space xyxy boxes are converted to FiftyOne's normalized
+        rxywh.  Per-detection masks are reconstructed from the ``.npy``
+        file the node wrote into ComfyUI's output dir.
+        """
+        boxes_json = params.get("boxes_json", "")
+        pred_labels_json = params.get("pred_labels_json", "")
+        scores_json = params.get("scores_json", "")
+        masks_filename = params.get("masks_filename", "")
+        fallback_labels = params.get("fallback_labels", "")
+        image_height = int(params.get("image_height", 0) or 0)
+        image_width = int(params.get("image_width", 0) or 0)
+
+        print(
+            f"[comfyui-plugin] _save_detections: field={field_name!r}, "
+            f"image_payload=({image_height}x{image_width}), "
+            f"boxes_json_len={len(boxes_json or '')}, "
+            f"labels_json_len={len(pred_labels_json or '')}, "
+            f"scores_json_len={len(scores_json or '')}, "
+            f"masks_filename={masks_filename!r}, "
+            f"fallback_labels={fallback_labels!r}"
+        )
+
+        # Load masks first so we can derive bboxes from them if needed.
+        masks_arr = SaveComfyOutput._load_masks_npy(port, masks_filename)
+
+        # The node-side already drops boxes that aren't ``[[x1,y1,x2,y2],
+        # ...]`` shaped (see FO_SaveDetections.execute), so by the time
+        # we get here ``boxes_json`` is either valid bbox JSON or empty.
+        boxes = _parse_jsonish_list(boxes_json)
+
+        # Boxes-from-masks fallback (instance-segmentation-style workflows
+        # where the user only connected MASK output, e.g. SAM2 / SAM3
+        # mask-only flows).
+        if not boxes and masks_arr is not None:
+            boxes = _bboxes_from_masks(masks_arr)
+            print(f"[comfyui-plugin]   derived {len(boxes)} bbox(es) from masks")
+
+        if not boxes:
+            print(
+                "[comfyui-plugin]   nothing to save — no boxes from upstream "
+                "and no masks to derive them from"
+            )
+            return
+
+        image_height, image_width = SaveComfyOutput._resolve_image_dims(
+            dataset, sample_id, image_height, image_width, masks_arr,
+        )
+
+        labels = _resolve_detection_labels(
+            pred_labels_json, fallback_labels, len(boxes),
+        )
+        scores = _parse_jsonish_list(scores_json) or [None] * len(boxes)
+
+        detections = SaveComfyOutput._build_detections(
+            boxes, labels, scores, masks_arr, image_height, image_width,
+        )
+
         if not detections:
             print(
                 f"[comfyui-plugin] nothing usable to save → field {field_name!r} not "
@@ -2049,55 +1183,6 @@ class SaveComfyOutput(foo.Operator):
         print(f"[comfyui-plugin] saved text field '{field_name}' on sample {sample_id}")
 
 
-class GetComfyTemplates(foo.Operator):
-    """Return available workflow templates filtered by media type."""
-
-    @property
-    def config(self):
-        return foo.OperatorConfig(
-            name="get_comfy_templates",
-            label="Get ComfyUI Templates",
-            unlisted=True,
-        )
-
-    def execute(self, ctx):
-        filepath = ctx.params.get("filepath", "")
-        media_type = _get_media_type(filepath) if filepath else "image"
-        print(
-            f"[comfyui-plugin] GetComfyTemplates: filepath={filepath!r}, "
-            f"media_type={media_type!r}"
-        )
-
-        try:
-            manifest = _load_manifest()
-        except Exception as e:
-            print(f"[comfyui-plugin] GetComfyTemplates: manifest error: {e}")
-            traceback.print_exc()
-            return {"templates": [], "default": None}
-
-        all_templates = manifest.get("templates", [])
-        compatible = [
-            t for t in all_templates
-            if media_type in t.get("input_types", [])
-        ]
-        compat_ids = [t["id"] for t in compatible]
-        print(
-            f"[comfyui-plugin] GetComfyTemplates: returning {len(compatible)}/{len(all_templates)} "
-            f"compatible template(s) for media_type={media_type!r}: {compat_ids}"
-        )
-
-        return {
-            "templates": compatible,
-            "default": compatible[0]["id"] if compatible else None,
-        }
-
-
-# ---------------------------------------------------------------------------
-# Registration
-# ---------------------------------------------------------------------------
-
-
 def register(p):
     p.register(ComfyUIPanel)
     p.register(SaveComfyOutput)
-    p.register(GetComfyTemplates)

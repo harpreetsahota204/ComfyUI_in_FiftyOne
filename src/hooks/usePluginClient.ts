@@ -11,6 +11,7 @@ export interface PanelMethodUris {
   stop_server: string;
   load_template: string;
   save_template: string;
+  get_templates: string;
   update_config: string;
   get_group_slices: string;
   inject_slice: string;
@@ -69,6 +70,12 @@ export function usePluginClient(uris: PanelMethodUris) {
           name,
           workflow,
         }),
+      getTemplates: (filepath?: string) =>
+        call<{ templates?: any[]; default?: string | null }>(
+          "get_templates",
+          { filepath: filepath || "" },
+          { templates: [], default: null },
+        ),
       updateConfig: (config: Record<string, any>) =>
         call<{ status: string }>("update_config", config, { status: "unknown" }),
       getGroupSlices: () =>

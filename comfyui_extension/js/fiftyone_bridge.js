@@ -481,28 +481,21 @@ function getSuggestionsForNode(node) {
   return [];
 }
 
-function showInlineInput(node, widget, suggestions) {
-  _DBG("showInlineInput: ENTER node=", node.id, "widget=", widget.name, "suggestions=", suggestions, "last_y=", widget.last_y);
+// Delay before an inline picker's blur commits, so a click landing on one of
+// the picker's own elements (which fires blur first) can cancel the commit.
+const BLUR_COMMIT_MS = 200;
 
-  if (_activeInlineInput) {
-    _DBG("showInlineInput: removing previous active input");
-    _activeInlineInput.remove();
-    _activeInlineInput = null;
-  }
-
+// Compute the on-screen position of a node's widget. Returns null if the
+// canvas isn't available; ``scale`` is the graph zoom (callers derive widths).
+function widgetScreenRect(node, widget) {
   const canvas = app.canvas;
   const canvasEl = canvas.canvas;
-  if (!canvasEl) {
-    _DBG("showInlineInput: ABORT — no canvas element");
-    return;
-  }
+  if (!canvasEl) return null;
   const rect = canvasEl.getBoundingClientRect();
   const scale = canvas.ds?.scale || 1;
-
   const widgetY = widget.last_y !== undefined ? widget.last_y : 0;
   const gx = node.pos[0];
   const gy = node.pos[1] + widgetY;
-
   const convertFn = canvas.ds?.convertOffsetToCanvas;
   let screenX, screenY;
   if (convertFn) {
@@ -513,6 +506,45 @@ function showInlineInput(node, widget, suggestions) {
     screenX = gx * scale + rect.left;
     screenY = gy * scale + rect.top;
   }
+  return { screenX, screenY, scale };
+}
+
+// Build a removable pill element. ``onRemove`` runs when the user clicks it.
+// Shared by the labels picker (Set-backed) and the free-text pill picker
+// (Array-backed) — they differ only in selection storage and accent color.
+function makePillEl(name, accent, onRemove) {
+  const pill = document.createElement("span");
+  pill.style.cssText =
+    `background:${accent};color:#1a1a2e;padding:2px 6px;` +
+    `border-radius:10px;font-size:11px;cursor:pointer;` +
+    `display:inline-flex;align-items:center;gap:4px;`;
+  pill.textContent = name;
+  const x = document.createElement("span");
+  x.textContent = "×";
+  x.style.cssText = "font-weight:bold;font-size:14px;line-height:1;";
+  pill.appendChild(x);
+  pill.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    onRemove();
+  });
+  return pill;
+}
+
+function showInlineInput(node, widget, suggestions) {
+  _DBG("showInlineInput: ENTER node=", node.id, "widget=", widget.name, "suggestions=", suggestions, "last_y=", widget.last_y);
+
+  if (_activeInlineInput) {
+    _DBG("showInlineInput: removing previous active input");
+    _activeInlineInput.remove();
+    _activeInlineInput = null;
+  }
+
+  const r = widgetScreenRect(node, widget);
+  if (!r) {
+    _DBG("showInlineInput: ABORT — no canvas element");
+    return;
+  }
+  const { screenX, screenY, scale } = r;
   const sw = node.size[0] * scale;
   const sh = (LiteGraph.NODE_WIDGET_HEIGHT || 20) * scale;
 
@@ -578,7 +610,7 @@ function showInlineInput(node, widget, suggestions) {
       app.graph.setDirtyCanvas(true, true);
     }
   });
-  input.addEventListener("blur", () => { blurTimeout = setTimeout(commit, 200); });
+  input.addEventListener("blur", () => { blurTimeout = setTimeout(commit, BLUR_COMMIT_MS); });
   input.addEventListener("focus", () => { if (blurTimeout) clearTimeout(blurTimeout); });
 
   _DBG("showInlineInput: DONE — container added to DOM, listId=", listId);
@@ -708,26 +740,9 @@ function showInlineLabelsPicker(node, widget, available) {
     _activeInlineInput = null;
   }
 
-  const canvas = app.canvas;
-  const canvasEl = canvas.canvas;
-  if (!canvasEl) return;
-  const rect = canvasEl.getBoundingClientRect();
-  const scale = canvas.ds?.scale || 1;
-
-  const widgetY = widget.last_y !== undefined ? widget.last_y : 0;
-  const gx = node.pos[0];
-  const gy = node.pos[1] + widgetY;
-
-  const convertFn = canvas.ds?.convertOffsetToCanvas;
-  let screenX, screenY;
-  if (convertFn) {
-    const [cx, cy] = convertFn.call(canvas.ds, [gx, gy]);
-    screenX = cx + rect.left;
-    screenY = cy + rect.top;
-  } else {
-    screenX = gx * scale + rect.left;
-    screenY = gy * scale + rect.top;
-  }
+  const r = widgetScreenRect(node, widget);
+  if (!r) return;
+  const { screenX, screenY, scale } = r;
   const sw = Math.max(node.size[0] * scale, 240);
 
   // Parse current widget value into a set, keeping only known fields
@@ -772,22 +787,10 @@ function showInlineLabelsPicker(node, widget, available) {
       return;
     }
     selected.forEach((name) => {
-      const pill = document.createElement("span");
-      pill.style.cssText =
-        `background:#4ecca3;color:#1a1a2e;padding:2px 6px;` +
-        `border-radius:10px;font-size:11px;cursor:pointer;` +
-        `display:inline-flex;align-items:center;gap:4px;`;
-      pill.textContent = name;
-      const x = document.createElement("span");
-      x.textContent = "×";
-      x.style.cssText = "font-weight:bold;font-size:14px;line-height:1;";
-      pill.appendChild(x);
-      pill.addEventListener("mousedown", (e) => {
-        e.preventDefault();
+      pillsRow.appendChild(makePillEl(name, "#4ecca3", () => {
         selected.delete(name);
         renderAll();
-      });
-      pillsRow.appendChild(pill);
+      }));
     });
   }
 
@@ -856,7 +859,7 @@ function showInlineLabelsPicker(node, widget, available) {
     }
   });
   input.addEventListener("blur", () => {
-    blurTimer = setTimeout(commit, 200);
+    blurTimer = setTimeout(commit, BLUR_COMMIT_MS);
   });
   input.addEventListener("focus", () => {
     if (blurTimer) {
@@ -915,24 +918,9 @@ function showInlinePillPicker(node, widget, opts = {}) {
     _activeInlineInput = null;
   }
 
-  const canvas = app.canvas;
-  const canvasEl = canvas.canvas;
-  if (!canvasEl) return;
-  const rect = canvasEl.getBoundingClientRect();
-  const scale = canvas.ds?.scale || 1;
-  const widgetY = widget.last_y !== undefined ? widget.last_y : 0;
-  const gx = node.pos[0];
-  const gy = node.pos[1] + widgetY;
-  const convertFn = canvas.ds?.convertOffsetToCanvas;
-  let screenX, screenY;
-  if (convertFn) {
-    const [cx, cy] = convertFn.call(canvas.ds, [gx, gy]);
-    screenX = cx + rect.left;
-    screenY = cy + rect.top;
-  } else {
-    screenX = gx * scale + rect.left;
-    screenY = gy * scale + rect.top;
-  }
+  const r = widgetScreenRect(node, widget);
+  if (!r) return;
+  const { screenX, screenY, scale } = r;
   const sw = Math.max(node.size[0] * scale, 240);
   const accent = opts.accent || "#ffb454";
 
@@ -977,22 +965,10 @@ function showInlinePillPicker(node, widget, opts = {}) {
       return;
     }
     pills.forEach((name, idx) => {
-      const pill = document.createElement("span");
-      pill.style.cssText =
-        `background:${accent};color:#1a1a2e;padding:2px 6px;` +
-        `border-radius:10px;font-size:11px;cursor:pointer;` +
-        `display:inline-flex;align-items:center;gap:4px;`;
-      pill.textContent = name;
-      const x = document.createElement("span");
-      x.textContent = "×";
-      x.style.cssText = "font-weight:bold;font-size:14px;line-height:1;";
-      pill.appendChild(x);
-      pill.addEventListener("mousedown", (e) => {
-        e.preventDefault();
+      pillsRow.appendChild(makePillEl(name, accent, () => {
         pills.splice(idx, 1);
         renderAll();
-      });
-      pillsRow.appendChild(pill);
+      }));
     });
   }
 
@@ -1057,7 +1033,7 @@ function showInlinePillPicker(node, widget, opts = {}) {
       renderAll();
     }
   });
-  input.addEventListener("blur", () => { blurTimer = setTimeout(commit, 200); });
+  input.addEventListener("blur", () => { blurTimer = setTimeout(commit, BLUR_COMMIT_MS); });
   input.addEventListener("focus", () => {
     if (blurTimer) { clearTimeout(blurTimer); blurTimer = null; }
   });
