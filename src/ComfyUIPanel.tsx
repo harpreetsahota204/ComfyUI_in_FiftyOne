@@ -617,7 +617,9 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
         await refreshGroupSlices();
 
         const isNowGrouped = _module.cachedSliceInfo.datasetIsGrouped;
-        if (!wasGrouped && isNowGrouped && saveAs === "group_slice") {
+        const flatToGroupedTransition =
+          !wasGrouped && isNowGrouped && saveAs === "group_slice";
+        if (flatToGroupedTransition) {
           _DBG("executeSave: flat→grouped transition detected, raising banner");
           _module.flatGroupedNotice = true;
           setShowFlatGroupedBanner(true);
@@ -654,8 +656,19 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
           setShowThreeDSavedBanner(true);
         }
 
-        _DBG("executeSave: triggering dataset reload via panel method");
-        client.triggerReload();
+        // Skip the dataset reload on the first flat→grouped transition.
+        // reload_dataset() reloads a now-grouped dataset underneath the open
+        // sample modal, which desyncs FiftyOne's modal space tree and can
+        // crash SpaceTree.splitLayout/moveNode on the next layout click
+        // (a frozen, unclickable modal).  The flat→grouped banner already
+        // tells the user to refresh + reopen the modal to see the new slice,
+        // so the reload is redundant in this case anyway.
+        if (flatToGroupedTransition) {
+          _DBG("executeSave: SKIPPING reload (flat→grouped; banner asks user to refresh)");
+        } else {
+          _DBG("executeSave: triggering dataset reload via panel method");
+          client.triggerReload();
+        }
       } catch (err) {
         console.error("[comfyui-plugin] save error:", err);
       } finally {
