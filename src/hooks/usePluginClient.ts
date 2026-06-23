@@ -10,6 +10,7 @@ export interface PanelMethodUris {
   start_server: string;
   stop_server: string;
   load_template: string;
+  get_sample_workflow: string;
   save_template: string;
   get_templates: string;
   update_config: string;
@@ -64,6 +65,11 @@ export function usePluginClient(uris: PanelMethodUris) {
           template_id: templateId,
           sample_filename: sampleFilename || "",
           filepath: filepath || "",
+        }),
+      getSampleWorkflow: (filepath?: string, sampleId?: string) =>
+        call<{ workflow?: any }>("get_sample_workflow", {
+          filepath: filepath || "",
+          sample_id: sampleId || "",
         }),
       saveTemplate: (name: string, workflow: any) =>
         call<{ status?: string; template_id?: string; error?: string }>("save_template", {

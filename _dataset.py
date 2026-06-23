@@ -80,6 +80,10 @@ def _ensure_comfy_fields(dataset: fo.Dataset):
         "comfy_model": fo.StringField,
         "comfy_node_title": fo.StringField,
         "comfy_prompt_id": fo.StringField,
+        # Method-A durable fallback for workflow reload: the UI/graph form
+        # of the workflow that generated this sample (see _comfy_io and
+        # the get_sample_workflow panel method).
+        "comfy_workflow_ui_json": fo.StringField,
     }
     for name, ftype in fields.items():
         if name not in schema:

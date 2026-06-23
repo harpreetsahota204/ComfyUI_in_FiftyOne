@@ -24,6 +24,63 @@ def _get_media_type(filepath: str) -> str:
     return "image"
 
 
+def _is_ui_graph(obj) -> bool:
+    """True if *obj* is a loadable ComfyUI UI graph.
+
+    The UI/graph format that ``app.loadGraphData`` consumes has a
+    top-level ``nodes`` list.  This guards against handing the loader the
+    API/prompt format (a dict keyed by node-id) or arbitrary file
+    metadata that happens to be JSON.
+    """
+    return isinstance(obj, dict) and isinstance(obj.get("nodes"), list)
+
+
+def _parse_ui_graph(raw) -> "dict | None":
+    """Parse a JSON string into a ComfyUI UI graph, else ``None``.
+
+    Shared by both workflow sources (embedded media metadata and the
+    persisted field): returns the graph only if it parses and is a valid
+    UI graph, so callers never feed junk to the front-end loader.
+    """
+    if not raw:
+        return None
+    try:
+        graph = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return graph if _is_ui_graph(graph) else None
+
+
+def _extract_embedded_workflow(filepath: str) -> "dict | None":
+    """Method B: the ComfyUI UI graph embedded in a media file, or ``None``.
+
+    ComfyUI's SaveImage writes the full litegraph workflow into the PNG
+    ``workflow`` tEXt chunk — the same data that dragging an image onto
+    the canvas reads back.  We parse it directly off disk so *any*
+    ComfyUI-produced PNG can reload its originating graph, even images
+    imported into the dataset outside this plugin.
+
+    Returns ``None`` (so the caller can fall back to the persisted field)
+    for non-image media, files without the chunk, or anything that
+    doesn't parse into a valid UI graph.
+    """
+    if not filepath or _get_media_type(filepath) != "image":
+        return None
+
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+
+    try:
+        with Image.open(filepath) as img:
+            raw = (img.info or {}).get("workflow")
+    except (OSError, ValueError):
+        return None
+
+    return _parse_ui_graph(raw)
+
+
 def _patch_load_image_nodes(workflow: dict, sample_filename: str) -> dict:
     """Patch or inject a LoadImage node so the current sample is referenced.
 

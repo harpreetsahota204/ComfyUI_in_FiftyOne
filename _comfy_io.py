@@ -110,8 +110,22 @@ def _fetch_comfy_metadata(port: int, prompt_id: str) -> "dict | None":
         api_workflow = {}
     print(f"[comfyui-plugin]   api_workflow: {len(api_workflow)} nodes")
 
+    # The UI/graph form (litegraph nodes + links) needed to *reload* the
+    # workflow lives under extra_data.extra_pnginfo.workflow — distinct
+    # from the API/prompt form above, which only drives metadata
+    # extraction.  ComfyUI populates it for UI-queued prompts (how this
+    # plugin runs them); absent for purely API-queued ones.
+    ui_workflow = None
+    extra_data = history.get("extra_data", {})
+    if isinstance(extra_data, dict):
+        png_info = extra_data.get("extra_pnginfo", {})
+        if isinstance(png_info, dict) and isinstance(png_info.get("workflow"), dict):
+            ui_workflow = png_info["workflow"]
+    print(f"[comfyui-plugin]   ui_workflow present: {ui_workflow is not None}")
+
     metadata = {
         "workflow_json": api_workflow,
+        "workflow_ui_json": ui_workflow,
         "prompt": "",
         "negative_prompt": "",
         "seed": None,

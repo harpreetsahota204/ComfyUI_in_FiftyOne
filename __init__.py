@@ -75,10 +75,13 @@ from ._install import (
 from ._inject import (
     _inject_all_slices,
     _inject_sample,
+    _origin_input_filename,
 )
 from ._templates import (
+    _extract_embedded_workflow,
     _get_media_type,
     _load_manifest,
+    _parse_ui_graph,
     _patch_load_image_nodes,
 )
 from ._dataset import (
@@ -323,6 +326,118 @@ class ComfyUIPanel(foo.Panel):
             workflow = _patch_load_image_nodes(workflow, sample_filename)
 
         return {"workflow": workflow}
+
+    def get_sample_workflow(self, ctx):
+        """Return the ComfyUI graph that originally generated this sample.
+
+        Used by the panel to auto-load a comfy-originated sample's own
+        workflow as the default graph (instead of the starter).
+
+        - **Method B (primary):** parse the UI graph embedded in the media
+          file itself (the PNG ``workflow`` chunk).  Retroactive — works
+          for any ComfyUI PNG, including images imported outside this
+          plugin.
+        - **Method A (fallback):** the ``comfy_workflow_ui_json`` field we
+          persist at save time, for media whose file carries no embedded
+          graph (re-encoded images, non-PNG outputs).
+
+        The graph's LoadImage node(s) are repointed at the *source* image
+        this sample was generated from (so you see what produced it), or at
+        the open sample when no origin is recorded.  Returns
+        ``{"workflow": <ui graph>}`` when found, else ``{}``.
+        """
+        filepath = ctx.params.get("filepath", "")
+
+        workflow = _extract_embedded_workflow(filepath)
+        source = "embedded"
+        if workflow is None:
+            workflow = self._workflow_from_field(ctx, ctx.params.get("sample_id", ""))
+            source = "field"
+        if workflow is None:
+            print("[comfyui-plugin] get_sample_workflow: no originating workflow found")
+            return {}
+
+        load_filename = self._origin_load_filename(ctx, filepath)
+        if load_filename:
+            workflow = _patch_load_image_nodes(workflow, load_filename)
+
+        print(
+            f"[comfyui-plugin] get_sample_workflow: source={source}, "
+            f"load_image={load_filename or '(unchanged)'}, "
+            f"nodes={len(workflow.get('nodes', []))}"
+        )
+        return {"workflow": workflow}
+
+    def _origin_load_filename(self, ctx, filepath):
+        """Inject the LoadImage source image, returning its input-dir name.
+
+        Prefers the *source* image this sample was generated from (injected
+        under a dedicated ``fo_source_*.png`` so it shows the real origin
+        without disturbing ``fo_current_sample.png``).  Falls back to the
+        open sample's own image.  Returns ``""`` (leave the graph's
+        LoadImage untouched) when nothing usable can be injected.
+        """
+        fallback = ctx.params.get("sample_filename", "")
+        config = self._safe_get_config(ctx)
+        comfyui_path = config["comfyui_path"]
+        if not os.path.isdir(comfyui_path):
+            return fallback
+
+        origin_filepath = self._origin_filepath(ctx, ctx.params.get("sample_id", ""))
+        try:
+            if origin_filepath and origin_filepath != filepath:
+                return (
+                    _inject_sample(
+                        comfyui_path,
+                        origin_filepath,
+                        target_filename=_origin_input_filename(origin_filepath),
+                    )
+                    or fallback
+                )
+            if filepath:
+                return _inject_sample(comfyui_path, filepath) or fallback
+        except OSError as exc:
+            print(f"[comfyui-plugin] get_sample_workflow: inject error: {exc}")
+        return fallback
+
+    @staticmethod
+    def _resolve_sample(ctx, sample_id):
+        """The sample for *sample_id* (or the open sample), or ``None``."""
+        sid = sample_id or ctx.current_sample
+        if not sid:
+            return None
+        try:
+            return ctx.dataset[sid]
+        except (KeyError, ValueError):
+            return None
+
+    def _origin_filepath(self, ctx, sample_id):
+        """Filepath of the sample this one was generated from, or ``None``.
+
+        Generated samples record their origin as ``source_sample_id``
+        (new-sample saves) or ``parent_sample_id`` (group-slice saves).
+        """
+        sample = self._resolve_sample(ctx, sample_id)
+        if sample is None:
+            return None
+        for field in ("source_sample_id", "parent_sample_id"):
+            if not sample.has_field(field):
+                continue
+            origin_id = sample.get_field(field)
+            if not origin_id:
+                continue
+            try:
+                return ctx.dataset[origin_id].filepath
+            except (KeyError, ValueError):
+                continue
+        return None
+
+    def _workflow_from_field(self, ctx, sample_id):
+        """Method-A fallback: the UI graph persisted at save time, or None."""
+        sample = self._resolve_sample(ctx, sample_id)
+        if sample is None or not sample.has_field("comfy_workflow_ui_json"):
+            return None
+        return _parse_ui_graph(sample.get_field("comfy_workflow_ui_json"))
 
     def save_template(self, ctx):
         """Save a workflow as a reusable template."""
@@ -584,6 +699,7 @@ class ComfyUIPanel(foo.Panel):
                 start_server=self.start_server,
                 stop_server=self.stop_server,
                 load_template=self.load_template,
+                get_sample_workflow=self.get_sample_workflow,
                 save_template=self.save_template,
                 get_templates=self.get_templates,
                 update_config=self.update_config,
@@ -1163,6 +1279,13 @@ class SaveComfyOutput(foo.Operator):
             sample["comfy_workflow_json"] = (
                 json.dumps(wf_json) if isinstance(wf_json, dict) else str(wf_json)
             )
+
+        # The reloadable UI/graph form (Method-A fallback for
+        # get_sample_workflow).  Its field is declared by
+        # _ensure_comfy_fields, which both save paths call first.
+        ui_json = metadata.get("workflow_ui_json")
+        if ui_json:
+            sample["comfy_workflow_ui_json"] = json.dumps(ui_json)
 
     @staticmethod
     def _save_text(dataset, sample_id, save_as, field_name, text_value):

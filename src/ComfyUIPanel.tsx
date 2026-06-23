@@ -80,6 +80,11 @@ interface CachedSliceInfo {
  *   FiftyOne's 3D viewer / grid both cache aggressively; new samples
  *   or slices typically don't render in the modal until refresh.
  */
+// Synthetic, pinned template-dropdown entry representing the exact graph
+// that generated the open sample (vs. the reusable starter templates).
+const ORIGINATING_TEMPLATE_ID = "__fo_originating__";
+const ORIGINATING_TEMPLATE_LABEL = "✨ Workflow that generated this sample";
+
 const _module = {
   persistedIframe: null as HTMLIFrameElement | null,
   persistedIframeSrc: "",
@@ -103,6 +108,19 @@ const _module = {
   // SAM3 collector prompts (the bridge clears them on every
   // SAMPLE_CHANGED).
   lastBridgedSampleKey: "",
+  // Auto-load of a comfy-originated sample's own workflow:
+  // - pendingWorkflow holds a graph fetched before the bridge announced
+  //   BRIDGE_READY; the global handler flushes it once the bridge is up.
+  // - lastWorkflowFilepath guards against re-pushing the same sample's
+  //   graph on panel remount / save→reload, which would clobber edits.
+  // - originatingWorkflow caches the resolved graph so the pinned dropdown
+  //   entry can re-load it without another Python round-trip;
+  //   originatingFilepath records which sample it belongs to so the entry
+  //   (and its selection) survive panel unmount/remount.
+  pendingWorkflow: null as any,
+  lastWorkflowFilepath: "",
+  originatingWorkflow: null as any,
+  originatingFilepath: "",
 };
 
 // ---------------------------------------------------------------------------
@@ -138,6 +156,18 @@ function _globalMessageHandler(event: MessageEvent) {
         "*"
       );
       _DBG("postMessage(global): sent cached SLICE_INFO on BRIDGE_READY, slices=", ci.slices, "heatmapFields=", ci.heatmapFields, "labelFields=", ci.labelFields);
+    }
+
+    // Flush an originating workflow that was fetched before the bridge
+    // came up, so the comfy-generated sample reloads its own graph
+    // instead of the starter.
+    if (_module.pendingWorkflow && _module.persistedIframe?.contentWindow) {
+      _module.persistedIframe.contentWindow.postMessage(
+        { type: MSG.LOAD_WORKFLOW, workflow: _module.pendingWorkflow },
+        "*"
+      );
+      _DBG("postMessage(global): flushed pending LOAD_WORKFLOW on BRIDGE_READY");
+      _module.pendingWorkflow = null;
     }
     return;
   }
@@ -306,6 +336,7 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
     start_server: schema?.view?.start_server ?? "",
     stop_server: schema?.view?.stop_server ?? "",
     load_template: schema?.view?.load_template ?? "",
+    get_sample_workflow: schema?.view?.get_sample_workflow ?? "",
     save_template: schema?.view?.save_template ?? "",
     get_templates: schema?.view?.get_templates ?? "",
     update_config: schema?.view?.update_config ?? "",
@@ -329,7 +360,14 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
   const [sampleFilename, setSampleFilename] = useState(c?.sampleFilename || "");
 
   const [templates, setTemplates] = useState<TemplateInfo[]>([]);
-  const [selectedTemplate, setSelectedTemplate] = useState<string>("");
+  // Seed from module state so a remount (e.g. tab switch) re-shows the
+  // pinned originating-workflow entry as selected without re-fetching.
+  const [selectedTemplate, setSelectedTemplate] = useState<string>(() =>
+    _module.originatingFilepath ? ORIGINATING_TEMPLATE_ID : ""
+  );
+  const [originatingFor, setOriginatingFor] = useState<string>(
+    () => _module.originatingFilepath
+  );
   const [showSettings, setShowSettings] = useState(false);
   const [configPath, setConfigPath] = useState(c?.configPath || "");
   const [configPort, setConfigPort] = useState(String(c?.serverPort || DEFAULT_COMFY_PORT));
@@ -521,6 +559,58 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
       })
       .catch((err: any) =>
         console.warn("[comfyui-plugin] template load error:", err)
+      );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentFilepath]);
+
+  // ── Auto-load the originating ComfyUI workflow for this sample ───────
+  //
+  // B-first / A-fallback: ask Python for the graph that generated this
+  // sample (embedded PNG metadata first, then the persisted field).  If
+  // found, push it into the bridge as the default graph AND surface it as
+  // a pinned, pre-selected dropdown entry so it's both visible and
+  // re-loadable.  Fires once per distinct sample (lastWorkflowFilepath
+  // guard) so slice-tab clicks and save→reload cycles don't clobber an
+  // in-progress edit.  A user picking a template still overrides this.
+
+  useEffect(() => {
+    if (!currentFilepath) return;
+    if (currentFilepath === _module.lastWorkflowFilepath) return;
+    _module.lastWorkflowFilepath = currentFilepath;
+
+    client
+      .getSampleWorkflow(currentFilepath, currentSampleId)
+      .then((result) => {
+        const wf = result?.workflow;
+        if (!wf) {
+          _DBG("auto-load: no originating workflow for this sample");
+          _module.originatingWorkflow = null;
+          _module.originatingFilepath = "";
+          setOriginatingFor("");
+          // Drop a stale pinned selection when moving to a sample that has
+          // no originating graph; leave any real template pick intact.
+          setSelectedTemplate((prev) =>
+            prev === ORIGINATING_TEMPLATE_ID ? "" : prev
+          );
+          return;
+        }
+        _module.originatingWorkflow = wf;
+        _module.originatingFilepath = currentFilepath;
+        setOriginatingFor(currentFilepath);
+        setSelectedTemplate(ORIGINATING_TEMPLATE_ID);
+        if (_module.bridgeReady && iframeRef.current?.contentWindow) {
+          _DBG("auto-load: posting LOAD_WORKFLOW (bridge ready)");
+          iframeRef.current.contentWindow.postMessage(
+            { type: MSG.LOAD_WORKFLOW, workflow: wf },
+            "*"
+          );
+        } else {
+          _DBG("auto-load: bridge not ready, caching workflow for BRIDGE_READY");
+          _module.pendingWorkflow = wf;
+        }
+      })
+      .catch((err: any) =>
+        console.warn("[comfyui-plugin] auto-load workflow error:", err)
       );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentFilepath]);
@@ -985,6 +1075,19 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
       setSelectedTemplate(templateId);
       if (!templateId) return;
 
+      // The pinned entry re-loads the cached originating graph directly —
+      // no template file to read, no Python round-trip.
+      if (templateId === ORIGINATING_TEMPLATE_ID) {
+        const wf = _module.originatingWorkflow;
+        if (wf && iframeRef.current?.contentWindow) {
+          iframeRef.current.contentWindow.postMessage(
+            { type: MSG.LOAD_WORKFLOW, workflow: wf },
+            "*"
+          );
+        }
+        return;
+      }
+
       const result = await client.loadTemplate(templateId, sampleFilename, currentFilepath);
       if (result?.workflow && iframeRef.current?.contentWindow) {
         iframeRef.current.contentWindow.postMessage(
@@ -1303,13 +1406,18 @@ const ComfyUIPanel: React.FC<any> = ({ data, schema }) => {
         <div style={STYLES.statusDot(serverStatus)} />
         <span style={STYLES.statusText}>{statusLabel}</span>
 
-        {templates.length > 0 && (
+        {(templates.length > 0 || originatingFor === currentFilepath) && (
           <select
             style={STYLES.select}
             value={selectedTemplate}
             onChange={handleTemplateChange}
           >
             <option value="">Load template...</option>
+            {originatingFor === currentFilepath && (
+              <option value={ORIGINATING_TEMPLATE_ID}>
+                {ORIGINATING_TEMPLATE_LABEL}
+              </option>
+            )}
             {templates.map((t) => (
               <option key={t.id} value={t.id}>
                 {t.name}

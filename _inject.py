@@ -18,6 +18,19 @@ def _slice_filename(slice_name: str) -> str:
     return f"{_SLICE_FILE_PREFIX}{sanitized}.png"
 
 
+def _origin_input_filename(filepath: str) -> str:
+    """Input-dir filename for a generated sample's *source* image.
+
+    A dedicated, deterministic name (``fo_source_<stem>.png``) so the
+    originating workflow's LoadImage can show the real source image
+    without overwriting ``fo_current_sample.png`` — which still tracks the
+    open (generated) sample for templates / fresh workflows.
+    """
+    stem = os.path.splitext(os.path.basename(filepath))[0]
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", stem)
+    return f"fo_source_{sanitized}.png"
+
+
 def _inject_sample(
     comfyui_path: str,
     filepath: str,
