@@ -1,4 +1,4 @@
-"""Symlink the bridge extension and bundled vendor packs into ComfyUI."""
+"""Symlink the bridge extension (and any opt-in vendor packs) into ComfyUI."""
 
 import os
 
@@ -42,18 +42,22 @@ def _symlink_pack(src: str, dst: str, label: str) -> bool:
 
 
 def _install_extension(comfyui_path: str):
-    """Symlink the FiftyOne bridge + bundled custom-node packs into ComfyUI.
+    """Symlink the FiftyOne bridge (and any opt-in vendor packs) into ComfyUI.
 
-    Three pieces are installed:
+    The only thing always installed is the bridge itself:
 
-    1. ``comfyui_extension/``   → ``custom_nodes/fiftyone_bridge``
-       (FiftyOne save nodes + JS bridge)
-    2. ``vendor/ComfyUI-Grounding/`` → ``custom_nodes/ComfyUI-Grounding``
-    3. ``vendor/ComfyUI-SAM3/``      → ``custom_nodes/ComfyUI-SAM3``
+        ``comfyui_extension/`` → ``custom_nodes/fiftyone_bridge``
+        (FiftyOne save nodes + JS bridge)
 
-    All three use ``_symlink_pack`` which is idempotent and refuses to
-    overwrite a real directory — if a user already has Grounding or SAM3
-    installed manually, theirs wins and we log a warning.
+    The detection / segmentation packs are NOT bundled. ``vendor/`` is
+    git-ignored and normally absent, in which case it is silently skipped
+    and users install Grounding / SAM3 themselves via ComfyUI Manager. If a
+    developer has opted in by placing a pack under ``vendor/<subdir>``, it is
+    symlinked too (see ``_VENDOR_PACKS``).
+
+    Every symlink goes through ``_symlink_pack`` which is idempotent and
+    refuses to overwrite a real directory — if a user already has Grounding
+    or SAM3 installed manually, theirs wins and we log a warning.
     """
     custom_nodes_dir = os.path.join(comfyui_path, "custom_nodes")
     if not os.path.isdir(custom_nodes_dir):

@@ -1,19 +1,22 @@
 # ---------------------------------------------------------------------------
 # FiftyOne ComfyUI Plugin requirements
 #
-# This file unions the runtime requirements of:
-#   - the plugin itself (HTTP client for ComfyUI's REST API)
-#   - vendored ComfyUI-Grounding (object-detection node pack)
-#   - vendored ComfyUI-SAM3      (segmentation node pack, incl. interactive)
+# The plugin core only talks to ComfyUI over its REST API, so its sole hard
+# dependency is an HTTP client. We deliberately do NOT install the ML stacks
+# for the optional detection / segmentation packs here — those are not bundled
+# and would otherwise pull ~2-4 GB of weights/runtimes onto every machine,
+# whether or not the user wants them.
 #
-# The vendored packs ship under comfyui-plugin/vendor/ and get symlinked
-# into ComfyUI's custom_nodes/ at panel startup; their dependencies must
-# therefore be installed in the SAME Python environment that runs ComfyUI.
-#
-# First-time install pulls ~2-4 GB of ML weights/runtimes (transformers,
-# ultralytics, sam2/sam3 deps via comfy-env, etc.) and may take a few
-# minutes. flash-attn is NOT installed automatically; it's optional and
-# only speeds up Florence-2 / SA2VA inference.
+# Optional packs (install via ComfyUI Manager if you want the Detection /
+# Segmentation starter templates — see README "Optional detection /
+# segmentation packs"):
+#   - ComfyUI-Grounding  (object detection)    -> brings transformers, timm,
+#                                                  einops, ultralytics, peft,
+#                                                  huggingface_hub, ...
+#   - ComfyUI-SAM3       (segmentation)         -> brings comfy-env, which
+#                                                  manages SAM3's heavier deps
+# ComfyUI Manager installs each pack's own requirements.txt into the ComfyUI
+# environment, so there's nothing to declare here.
 # ---------------------------------------------------------------------------
 
 # Plugin core
@@ -23,22 +26,3 @@ requests
 # serialization to ComfyUI's built-in `save_glb` helper (the one the
 # native 'Save 3D Model' node uses), which is part of any modern
 # ComfyUI install.
-
-# Vendored ComfyUI-Grounding (object detection / SAM2 segmentation)
-transformers>=4.30.0
-timm>=0.9.0
-einops>=0.6.0
-ultralytics>=8.2.0
-hf_transfer
-peft
-huggingface_hub>=0.20.0
-pyyaml>=6.0
-tqdm>=4.65.0
-
-# Vendored ComfyUI-SAM3 (segmentation, incl. interactive collectors)
-# comfy-env handles SAM3's heavier deps (safetensors, opencv-python,
-# scikit-image, pycocotools, etc.) inside an isolated environment, so
-# they don't need to be listed here. We only declare comfy-env itself
-# and the 3D viewer that comfy-env's SAM3 manifest pulls in.
-comfy-env==0.3.24
-comfy-3d-viewers==0.2.41

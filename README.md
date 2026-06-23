@@ -1,5 +1,38 @@
 # FiftyOne ComfyUI Plugin
 
+<div align="center">
+<p align="center">
+
+<!-- prettier-ignore -->
+<img src="https://user-images.githubusercontent.com/25985824/106288517-2422e000-6216-11eb-871d-26ad2e7b1e59.png" height="55px"> &nbsp;
+<img src="https://user-images.githubusercontent.com/25985824/106288518-24bb7680-6216-11eb-8f10-60052c519586.png" height="50px">
+
+**The open-source tool for building high-quality datasets and computer vision
+models**
+
+---
+
+<!-- prettier-ignore -->
+<a href="https://voxel51.com/fiftyone?utm_source=harpreet-gh">Website</a> •
+<a href="https://docs.voxel51.com?utm_source=harpreet-gh">Docs</a> •
+<a href="https://colab.research.google.com/github/voxel51/fiftyone-examples/blob/master/examples/quickstart.ipynb?utm_source=harpreet-gh">Try it Now</a> •
+<a href="https://docs.voxel51.com/getting_started_guides/index.html?utm_source=harpreet-gh">Getting Started Guides</a> •
+<a href="https://docs.voxel51.com/tutorials/index.html?utm_source=harpreet-gh">Tutorials</a> •
+<a href="https://voxel51.com/blog/?utm_source=harpreet-gh">Blog</a> •
+<a href="https://discord.gg/fiftyone-community?utm_source=harpreet-gh">Community</a>
+
+[![Discord](https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white)](https://discord.gg/fiftyone-community)
+[![Hugging Face](https://img.shields.io/badge/Hugging_Face-purple?style=flat&logo=huggingface)](https://huggingface.co/Voxel51)
+[![Voxel51 Blog](https://img.shields.io/badge/Voxel51_Blog-ff6d04?style=flat)](https://voxel51.com/blog)
+[![Newsletter](https://img.shields.io/badge/Newsletter-BE5B25?logo=mail.ru&logoColor=white)](https://share.hsforms.com/1zpJ60ggaQtOoVeBqIZdaaA2ykyk)
+[![LinkedIn](https://img.shields.io/badge/In-white?style=flat&label=Linked&labelColor=blue)](https://www.linkedin.com/company/voxel51)
+[![Twitter](https://img.shields.io/badge/Twitter-000000?logo=x&logoColor=white)](https://x.com/voxel51)
+[![Medium](https://img.shields.io/badge/Medium-12100E?logo=medium&logoColor=white)](https://medium.com/voxel51)
+
+</p>
+</div>
+
+
 Embed a full [ComfyUI](https://github.com/comfyanonymous/ComfyUI) instance inside the FiftyOne sample modal. Run any workflow against the current sample and save outputs back to your dataset — as group slices, new samples, fields, heatmaps, classifications, detections, segmentation masks, or 3D models.
 
 ---
@@ -12,7 +45,7 @@ Open a sample in FiftyOne. Click the **ComfyUI** tab. You get a real ComfyUI ins
 - **Outputs go back to FiftyOne automatically** when you use any of the bundled `FO_Save*` nodes. No download/upload, no copy-paste.
 - **Right-click any image-producing node** → "Save Image to FiftyOne" — for one-off saves without modifying the workflow.
 - **19 starter workflow templates** ship with the plugin, including object detection (Grounding DINO) and segmentation (SAM3).
-- **Bundled detection + segmentation packs** — `ComfyUI-Grounding` and `ComfyUI-SAM3` are vendored and installed automatically.
+- **Bring your own nodes.** The plugin doesn't install third-party custom nodes on your machine. The two detection/segmentation templates need the `ComfyUI-Grounding` and `ComfyUI-SAM3` packs, which you install yourself via ComfyUI Manager — see [Optional detection / segmentation packs](#optional-detection--segmentation-packs).
 
 ---
 
@@ -21,10 +54,10 @@ Open a sample in FiftyOne. Click the **ComfyUI** tab. You get a real ComfyUI ins
 - **FiftyOne** ≥ 0.25
 - **Python** ≥ 3.9
 - **ComfyUI** — see install instructions below
-- **CUDA-capable GPU** (≥ 6 GB VRAM) — only for the bundled detection / segmentation pipelines. Other workflows work on CPU.
+- **CUDA-capable GPU** (≥ 6 GB VRAM) — only for the optional detection / segmentation packs. Other workflows work on CPU.
 - **ffmpeg** on `$PATH` — only if you want to encode raw video frames via `FO_SaveVideo`.
 
-First-time `pip install -r requirements.txt` pulls ~2-4 GB of ML dependencies (`transformers`, `huggingface_hub`, etc.). Allow a few minutes.
+The plugin core is lightweight — `pip install -r requirements.txt` only installs an HTTP client. The heavier ML dependencies (`transformers`, `ultralytics`, etc.) come *with* the optional detection/segmentation packs when you install them via ComfyUI Manager, so you only pay that ~2-4 GB cost if you actually want those pipelines.
 
 ---
 
@@ -126,7 +159,7 @@ There's also **`FO_LoadImage`** (also under FiftyOne/IO) — a thin alias for th
 
 ### Polymorphic inputs
 
-`FO_SaveDetections` accepts the output shape of either bundled detector pack on the same sockets:
+`FO_SaveDetections` accepts the output shape of either detector pack (once installed — see [Optional detection / segmentation packs](#optional-detection--segmentation-packs)) on the same sockets:
 
 - **ComfyUI-Grounding**: `BBOX` lists, `STRING` labels, `FLOAT` scores, `MASK` per-instance masks.
 - **ComfyUI-SAM3**: `STRING`-JSON boxes / scores, `MASK` per-instance masks.
@@ -204,6 +237,8 @@ The plugin ships **19 starter templates** covering image editing, generation, pr
 Save your own: build a workflow, click **Save Template**, give it a name. Saved templates appear in the dropdown alongside the built-ins.
 
 Templates are JSON files in `comfyui_extension/workflows/`. They also surface in ComfyUI's native **Workflow Templates** browser under the `fiftyone_bridge` group.
+
+> **Two templates need extra nodes.** The **Grounding (DINO) → Detections** and **SAM3 (Text) → Segmentation** templates reference nodes from the `ComfyUI-Grounding` and `ComfyUI-SAM3` packs, which the plugin does **not** install for you. If those nodes show up red ("missing"), install the packs via ComfyUI Manager — see [Optional detection / segmentation packs](#optional-detection--segmentation-packs). The other 17 templates work with a stock ComfyUI install.
 
 ---
 
@@ -317,14 +352,16 @@ If ComfyUI is already running externally on the configured port, the plugin dete
 
 ---
 
-## Bundled extras
+## Optional detection / segmentation packs
 
-The plugin vendors trimmed copies of two custom-node packs under `vendor/`. They're auto-symlinked into ComfyUI's `custom_nodes/` directory at panel startup:
+The plugin **does not install third-party custom nodes on your machine.** Only the `fiftyone_bridge` node (the plugin's own save nodes) is wired into ComfyUI automatically. The two enrichment templates rely on these packs, which you install yourself if you want them:
 
-- **`ComfyUI-Grounding`** — GroundingDINO, MM-GroundingDINO, OWLv2, Florence-2, YOLO-World, plus SAM2 segmentation. ([upstream](https://github.com/harpreetsahota204/ComfyUI-Grounding))
-- **`ComfyUI-SAM3`** — SAM3 segmentation: text, click, and box-based, plus four interactive collector nodes that let you click directly on a node-rendered canvas. ([upstream](https://github.com/harpreetsahota204/ComfyUI-SAM3))
+- **`ComfyUI-Grounding`** — GroundingDINO, MM-GroundingDINO, OWLv2, Florence-2, YOLO-World, plus SAM2 segmentation. Powers the **Grounding (DINO) → Detections** template. ([upstream](https://github.com/harpreetsahota204/ComfyUI-Grounding))
+- **`ComfyUI-SAM3`** — SAM3 segmentation: text, click, and box-based, plus four interactive collector nodes that let you click directly on a node-rendered canvas. Powers the **SAM3 (Text) → Segmentation** template. ([upstream](https://github.com/harpreetsahota204/ComfyUI-SAM3))
 
-If you'd rather use your own build of either pack, drop a real (non-symlink) directory at `ComfyUI/custom_nodes/ComfyUI-Grounding` or `ComfyUI/custom_nodes/ComfyUI-SAM3`. The plugin detects the conflict and skips its symlink, keeping yours.
+**To install them**, use **ComfyUI Manager** (Manager → Install via Git URL, paste the upstream URL above) or `git clone` each into `ComfyUI/custom_nodes/` and install its `requirements.txt`. Restart ComfyUI afterward. The `FO_SaveDetections` / `FO_SaveSegmentation` nodes accept either pack's output shape out of the box.
+
+**Opt-in local bundling (advanced).** If you maintain a fork and *want* to ship a pack with the plugin, drop it at `vendor/<PackName>/` and the plugin will symlink it into `custom_nodes/` at startup. `vendor/` is git-ignored so it never ships by default, and the symlink step refuses to overwrite a real (non-symlink) directory — so a manual install always wins.
 
 ---
 
@@ -361,7 +398,7 @@ The plugin emits debug logs in three places:
 
 - **Browser console** — `[fo-panel]`, `[fo-bridge]`, `[fo-host]`.
 - **FiftyOne terminal** — `[comfyui-plugin]`, `[FO_*]` from the operator save flow.
-- **ComfyUI terminal** — node `execute()` prints, vendored pack startup banners.
+- **ComfyUI terminal** — node `execute()` prints, plus startup banners from any optional packs you installed.
 
 When debugging save flows, you usually want all three open.
 

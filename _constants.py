@@ -20,11 +20,18 @@ EXTENSION_DIR = os.path.join(PLUGIN_DIR, "comfyui_extension")
 # read these only from the FiftyOne panel's own dropdown via the
 # get_templates panel method + _load_manifest() pair.
 TEMPLATES_DIR = os.path.join(EXTENSION_DIR, "workflows")
+# Optional, opt-in pack location. Git-ignored and normally absent; see
+# _VENDOR_PACKS below and _install_extension() for how it's used.
 VENDOR_DIR = os.path.join(PLUGIN_DIR, "vendor")
 
-# Bundled third-party custom-node packs that get symlinked into ComfyUI's
-# custom_nodes/ at panel startup. Each tuple is (vendor_subdir, dst_name)
-# where dst_name is the directory created under custom_nodes/.
+# Optional third-party custom-node packs. These are NOT bundled with the
+# plugin (vendor/ is git-ignored) — users install detection / segmentation
+# packs themselves via ComfyUI Manager. The entries below are an opt-in
+# convenience only: if a developer drops a pack into vendor/<subdir>,
+# _install_extension() will symlink it into ComfyUI's custom_nodes/ at panel
+# startup; when vendor/ is absent (the default) it is silently skipped.
+# Each tuple is (vendor_subdir, dst_name) where dst_name is the directory
+# created under custom_nodes/.
 _VENDOR_PACKS = (
     ("ComfyUI-Grounding", "ComfyUI-Grounding"),
     ("ComfyUI-SAM3", "ComfyUI-SAM3"),
