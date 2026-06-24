@@ -447,6 +447,19 @@ app.registerExtension({
       });
     }
 
+    // One-click: replace a native LoadImage node with FO_LoadImage pointed
+    // at the current sample, keeping every downstream wire intact.  Only
+    // offered on the built-in LoadImage — FO_LoadImage is already converted.
+    if (node.comfyClass === "LoadImage") {
+      items.push({
+        content: "Convert to Load Image from FiftyOne",
+        callback: () => {
+          _DBG("context menu: 'Convert to Load Image from FiftyOne' clicked, node=", node.type, "id=", node.id);
+          convertToFOLoadImage(node);
+        },
+      });
+    }
+
     return items;
   },
 });
@@ -1591,4 +1604,76 @@ function convertToFOSaveImage(node) {
 
   app.graph.setDirtyCanvas(true, true);
   _DBG("convertToFOSaveImage: replaced SaveImage", oldId, "→ FO_SaveImage", fresh.id);
+}
+
+// ---------------------------------------------------------------------------
+// One-click: replace a native ComfyUI ``LoadImage`` with our ``FO_LoadImage``
+// pointed at the current sample.  Unlike the SaveImage convert (which
+// preserves a single incoming wire), LoadImage is a *source* node: we must
+// preserve every OUTGOING wire from both the IMAGE (slot 0) and MASK (slot 1)
+// outputs, each of which may fan out to multiple consumers.  Output slots
+// line up 1:1 because FO_LoadImage subclasses LoadImage.
+// ---------------------------------------------------------------------------
+
+function convertToFOLoadImage(node) {
+  // Capture every downstream connection BEFORE removing the node — once it's
+  // gone, its links are destroyed.
+  const outgoing = [];
+  (node.outputs || []).forEach((out, slot) => {
+    (out.links || []).forEach((linkId) => {
+      const link = app.graph.links?.[linkId];
+      if (link) {
+        outgoing.push({
+          slot,
+          targetId: link.target_id,
+          targetSlot: link.target_slot,
+        });
+      }
+    });
+  });
+  _DBG("convertToFOLoadImage: capturing", outgoing.length, "downstream wires from node", node.id);
+
+  const pos = node.pos.slice();
+  const oldId = node.id;
+  app.graph.remove(node);
+
+  const fresh = LiteGraph.createNode("FO_LoadImage");
+  if (!fresh) {
+    console.warn("[fiftyone-bridge] convertToFOLoadImage: FO_LoadImage type not registered");
+    return;
+  }
+  fresh.pos = pos;
+  app.graph.add(fresh);
+
+  // Point the node at the current sample.  FiftyOne keeps
+  // fo_current_sample.png following the open sample / active slice; ensure
+  // it's selectable in the combo, then select it.  refreshLoadImagePreviews()
+  // below paints the thumbnail immediately instead of waiting for the next
+  // SAMPLE_CHANGED.
+  const widget = fresh.widgets?.find((w) => w.name === "image");
+  if (widget) {
+    if (widget.options?.values && !widget.options.values.includes("fo_current_sample.png")) {
+      widget.options.values.push("fo_current_sample.png");
+    }
+    widget.value = "fo_current_sample.png";
+    if (widget.callback) {
+      widget.callback(widget.value, app.graph, fresh);
+    }
+  }
+
+  // Restore every downstream connection to the matching output slot.
+  for (const { slot, targetId, targetSlot } of outgoing) {
+    const target = app.graph.getNodeById(targetId);
+    if (!target) continue;
+    try {
+      fresh.connect(slot, target, targetSlot);
+    } catch (e) {
+      console.warn("[fiftyone-bridge] convertToFOLoadImage: reconnect failed", e);
+    }
+  }
+
+  refreshLoadImagePreviews();
+  app.graph.setDirtyCanvas(true, true);
+  _DBG("convertToFOLoadImage: replaced LoadImage", oldId, "→ FO_LoadImage", fresh.id,
+    "wires restored=", outgoing.length);
 }
